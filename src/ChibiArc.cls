@@ -166,20 +166,20 @@ Public Enum arcType
   atAuto = 0
   atZip = 1
   at7Zip = 2
-  atTar = 3       ' ustar ? read/write; 100-char path limit, ASCII only
+  atTar = 3       ' ustar - read/write; 100-char path limit, ASCII only
   atTarGz = 4     ' ustar + gzip
   atTarBz2 = 5    ' ustar + bzip2
   atTarXz = 6     ' ustar + xz
   atTarZst = 7    ' ustar + zstd
-  atTarPax = 8    ' PAX ? read/write; unlimited paths, UTF-8, preferred for new archives
-  atTarPaxRestricted = 9  ' PAX restricted ? emits PAX headers only when necessary
-  atTarGnu = 10   ' GNU tar ? read/write; long filenames via GNU extensions
+  atTarPax = 8    ' PAX - read/write; unlimited paths, UTF-8, preferred for new archives
+  atTarPaxRestricted = 9  ' PAX restricted - emits PAX headers only when necessary
+  atTarGnu = 10   ' GNU tar - read/write; long filenames via GNU extensions
   atCpio = 11
   atXar = 12
-  atIso = 13      ' currently read only ? write present in archiveint.dll but untested in v1.0
-  atCab = 14      ' read only ? libarchive doesn't write CAB
-  atRar = 15      ' read only ? RAR apparently requires a commercial licence to generate
-  atRar5 = 16     ' read only ? same as above (atRar)
+  atIso = 13      ' currently read only - write present in archiveint.dll but untested in v1.0
+  atCab = 14      ' read only - libarchive doesn't write CAB
+  atRar = 15      ' read only - RAR apparently requires a commercial licence to generate
+  atRar5 = 16     ' read only - same as above (atRar)
 End Enum
 
 Public Enum ArchiveEncryption
@@ -515,7 +515,7 @@ Public Function SaveFile() As Boolean
     ' Standard path: libarchive end-to-end.
     result = SaveLibArchive()
     ' SaveLibArchive has no per-entry hook for compressed size, so we stat
-    ' the output file on success — the same "honest on-disk footprint"
+    ' the output file on success Â— the same "honest on-disk footprint"
     ' approach used by EnsureScanned in read mode. m_SourceFile is still
     ' populated here; CloseFile (below) wipes it via ResetState.
     If result Then
