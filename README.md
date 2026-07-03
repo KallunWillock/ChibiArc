@@ -13,8 +13,7 @@ ChibiArc is a single-class VBA module for reading and writing archive files — 
 *   **AES Encryption:** Courtesy of the great work of WQWeto, I have adapted his encryption work and shoehorned it into the class to allow for AES-128, AES-192, and AES-256 encryption.
 *   **High Performance:** Leverages `libarchive` for compression/decompression and raw Win32 APIs for I/O. The original version of this class provided both a pure VBA path and a `zlib1.dll`/`zlibwapi.dll` path, but I rewrote the whole class to rely solely on `archiveint.dll` because it is more performant.
 *   **Unicode Safe:** Full Unicode support for filenames and paths, including CJK and other non‑ASCII characters - even emojis if you're feeling adventurous.
-*   **Fail-Safe Design:** Error handling via `LastError` and `OperationReport`.
-*   **Zero External Dependencies:** Only requires `archiveint.dll` (which ships with Win10+) and other standard Windows system DLLs.
+*   **ISO Helpers:** Routines to mount and dismount ISO images as virtual drives.
 
 > [!IMPORTANT]
 > As ever, any bugs, blunders, oversights, and general acts of coding inelegance are entirely my own. Any sparks of coding brilliance very likely belong to other people.
@@ -54,8 +53,25 @@ If arc.NewFile("C:\secure\data.zip") Then
 End If
 ```
 
+### Mounting an ISO image
+```vba
+Sub TestISO_MountDismount()
+  Dim arc As New ChibiArc
+  Dim drive As String
+  
+  drive = arc.MountISO("C:\ChibiArc_Demo\demo.iso")
+  If drive <> "" Then
+    Debug.Print "Mounted at " & drive
+    Debug.Print "First file: " & Dir(drive & "*.*")
+    arc.DismountISO
+  Else
+    Debug.Print "Mount failed: " & arc.LastError
+  End If
+End Sub
+```
+
 > [!CAUTION]
-> Legal note: This is covered off in the MIT License (see below/attached/to the side), but it is worth reiterating: ChibiArc is provided entirely “as is”. No warranty, express or implied, is given. If you use this in production, you do so at your own risk and with my deepest sympathy.
+> Legal note: This is covered off in the MIT License (see below/attached/to the side), but it is worth reiterating: ChibiArc is provided entirely "as is". No warranty, express or implied, is given. If you use this in production, you do so at your own risk and with my deepest sympathy.
 
 ## A 'quick' note about encryption: ZipCrypto vs AES
 
@@ -76,7 +92,7 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 **TL;DR:** Use ZipCrypto if compatibility with Windows Explorer is non-negotiable and the stakes are low. Use AES-256 for everything else.
 
 > [!NOTE]
-> For those playing along at home, here is one point worth noting: the Windows build of archiveint.dll handles ZipCrypto end-to-end (both reading and writing), but it cannot write AES-encrypted ZIPs. For AES, ChibiArc uses an encryption pipeline (adapted from wqweto’s genius VB6/VBA AES implementation) while still leveraging libarchive for DEFLATE compression. Reading AES archives works fine through libarchive regardless — it’s only the write path that needed the custom VBA layer. Invariably, someone far smarter than I will point out that the method I've adopted is not best practice and/or is brittle, and they may well be right. It does, however, **seem** to work, which is (almost always) good enough for me.
+> For those playing along at home, here is one point worth noting: the Windows build of archiveint.dll handles ZipCrypto end-to-end (both reading and writing), but it cannot write AES-encrypted ZIPs. For AES, ChibiArc uses an encryption pipeline (adapted from wqweto's genius VB6/VBA AES implementation) while still leveraging libarchive for DEFLATE compression. Reading AES archives works fine through libarchive regardless - it's only the write path that needed the custom VBA layer. Invariably, someone far smarter than I will point out that the method I've adopted is not best practice and/or is brittle, and they may well be right. It does, however, **seem** to work, which is (almost always) good enough for me.
 
 ## API Overview
 
@@ -84,20 +100,32 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 | Method | Description |
 | :--- | :--- |
 | `NewFile(Path, [Type], [Pass])` | Initialise a new archive |
-| `Add(Source, [Dest])` | Queue files, folders, or byte arrays |
+| `Add(Source, [Dest])` | Queue files, folders, byte arrays, or in-memory data |
+| `AddNew(Name, [ParentPath])` | Queue a new empty entry for later writing |
 | `SaveFile()` | Write queued items to disk and close |
 | `Encryption` | Set to `aeNone`, `aeZipCrypto`, `aeAes128`, `aeAes192`, or `aeAes256` |
 | `PassPhrase` | Password used for AES or ZipCrypto encryption |
-| `CompressionLevel` | Set compression level (0-9) - hot tip, you're probably best just leaving it at 6 |
+| `CompressionLevel` | Set compression level (0-9) - 6 is a sensible default |
+| `ConflictMode` | Choose how duplicate entry names are handled: Reject, Overwrite, or Rename |
+| `SkipCompressedFileTypes` | Skip a second compression pass for already-compressed files |
 
 ### Read Mode
 | Method | Description |
 | :--- | :--- |
 | `OpenFile(Path, [Pass])` | Open an existing archive |
-| `Dir([Pattern])` | List entries matching wildcard pattern |
-| `Extract(Name, [Path])` | Extract single entry to disk or memory |
+| `Dir([Pattern])` | List entries - allows for wildcard patterns |
+| `Extract(Name, [Path])` | Extract a single entry to disk or memory |
 | `ExtractAll(Path)` | Extract all entries to a folder |
 | `CloseFile()` | Close the archive handle |
+
+### ISO helpers
+| Method | Description |
+| :--- | :--- |
+| `MountISO(Path, [ReadOnly], [AutoDriveLetter])` | Mount an ISO image as a virtual drive |
+| `MountISOToLetter(Path, DriveLetter, [ReadOnly])` | Mount an ISO image to a specific drive letter |
+| `DismountISO([Force])` | Detach the currently mounted ISO |
+| `ListMountedISOs()` | Returns a list of currently mounted ISO paths |
+| `IsISOMounted([Path])` | Check whether an ISO image is currently mounted |
 
 ### Properties
 | Property | Description |
@@ -111,21 +139,26 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 | `ConflictMode` | How duplicate entry names are handled during Add: Reject, Overwrite, or Rename |
 | `LastError` | Detailed error message from the last operation |
 | `LastOperationTime` | Duration of the last SaveFile/ExtractAll operation (in seconds) |
+| `LogLevel` | Logging verbosity |
+| `ProgressInterval` | Number of entries between `ProgressEvent` notifications. The default is to raise the event for every entry |
+| `AutoDismountOnTerminate` | Automatically dismount an ISO when the object is released or otherwise destroyed |
 
 ### Events
 | Event | Description |
 | :--- | :--- |
 | `ProgressEvent` | Raised periodically during long operations (compression, extraction, etc.) |
+| `IsoMounted` | Raised when an ISO image is mounted |
+| `IsoDismounted` | Raised when an ISO image is dismounted |
 
 > [!NOTE]
 > This is not an exhaustive list; it's just slightly truncated because I'm exhausted writing it.
 
 ## Limitations
-* **No Zip64 support** - Effectively, this caps maximum archive size at roughly 2 GB depending on entry layout. I personally have never seen a zip file  even close to that size, and I query whether one should/could rely on VBA for anything of the sort.
+* **No Zip64 support** - Effectively, this caps maximum archive size at roughly 2 GB depending on entry layout. I personally have never seen a zip file even close to that size, and I query whether one should/could rely on VBA for anything of the sort.
 
-* **ISO is (currently) read‑only** - Libarchive supports ISO creation, but ChibiArc currently exposes only the read path. I only realised late in the day that LibArchive supported ISO creation, and didn't want this lack of awareness of my part to hold anything up. Write support will be added later (including perhaps ISO mounting... TBD).
+* **ISO naming is constrained** - ChibiArc can now write ISO images, but ISO9660/Joliet rules remain restrictive. An entry with a name entirely in non-ASCII (e.g.: a Chinese/Japanese/Korean script-only folder name) is now rejected with a clear error rather than being silently dropped, so you do not lose data without knowing about it. Mixed names seem to be fine. Use ZIP or 7-Zip if you need unrestricted non-ASCII naming.
 
-* **Windows‑only** - ChibiArc depends on archiveint.dll, the Windows implementation for libarchive. It ships with later versions of Windows 10+ apparently, but is not available on macOS. That said, ChibiArc is the current incarnation of a pure-VBA version, so I may eventually dust off and update that version and add that to the repo. It will rely on Cristian Buse's VBA-MemoryTools code (https://github.com/cristianbuse/VBA-MemoryTools).
+* **Windows‑only** - ChibiArc depends on `archiveint.dll`, the Windows implementation for libarchive. It ships with later versions of Windows 10+ apparently, but is not available on macOS. That said, ChibiArc is the current incarnation of a pure-VBA version, so I may eventually dust off and update that version and add that to the repo. It will rely on Cristian Buse's VBA-MemoryTools code (https://github.com/cristianbuse/VBA-MemoryTools).
 
 * **AES requires compatible tools** - Again, Windows Explorer cannot extract AES‑encrypted ZIPs. Recipients will need 7‑Zip, WinZip, or **ChibiArc**.
 
@@ -135,7 +168,7 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 
 ## Credits
 
-ChibiArc was created by Kallun Willock.
+ChibiArc was created by Kallun Willock (me).
 
 * However, the AES encryption element would not be possible without **WQWeto**: <https://www.vbforums.com/showthread.php?862103>
 * Indeed, I would not even know about `archiveint.dll` at all were it not for WQWeto's GZIP solution:  
@@ -154,6 +187,11 @@ ChibiArc was created by Kallun Willock.
 * WinZip AES encryption specification: <http://www.winzip.com/aes_info.htm>
 
 ---
+
+## Changelog
+
+* 1.1: Added ISO write support and ISO mount/dismount helpers
+* 1.0: Initial public release
 
 ## License
 
