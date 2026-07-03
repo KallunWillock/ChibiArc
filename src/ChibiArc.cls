@@ -608,7 +608,7 @@ Public Function SaveFile() As Boolean
     ' Standard path: libarchive end-to-end.
     result = SaveLibArchive()
     ' SaveLibArchive has no per-entry hook for compressed size, so we stat
-    ' the output file on success ? the same "honest on-disk footprint"
+    ' the output file on success - the same "honest on-disk footprint"
     ' approach used by EnsureScanned in read mode. m_SourceFile is still
     ' populated here; CloseFile (below) wipes it via ResetState.
     If result Then
