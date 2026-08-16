@@ -7,9 +7,9 @@
 ![VBA](https://img.shields.io/badge/VBA-64bit-purple.svg)
 ![Dependencies](https://img.shields.io/badge/Dependencies-archiveint.dll-orange.svg)
 
-ChibiArc is a single-class VBA module for reading and writing archive files — ZIP, 7-Zip, TAR variants, and more — directly from Excel, Word, or any Office application.
-
-*   **Multi-Format Support:** It reads and writes a myriad of file formats (some of which I've never heard of), but importantly, this includes read/write ZIP, 7-Zip and TAR. `libarchive` will read and write ISO, but ChibiArc currently only reads ISO files. CAB and RAR are read-only under `libarchive`, but I can add code for the writing of CAB files if needed.
+ChibiArc is a single-class VBA module for reading and writing archive files - ZIP, 7-Zip, TAR variants, and more - directly from Excel, Word, or any Office application.
+    
+*   **Multi-Format Support:** It reads and writes a myriad of file formats (some of which I've never heard of), but importantly, this includes read/write ZIP, 7-Zip, TAR, and ISO. CAB is also supported for both read and write operations. The CAB write support leverages the native Windows `cabinet.dll` File Compression Interface (FCI) via in-memory machine code thunks. 
 *   **AES Encryption:** Courtesy of the great work of WQWeto, I have adapted his encryption work and shoehorned it into the class to allow for AES-128, AES-192, and AES-256 encryption.
 *   **High Performance:** Leverages `libarchive` for compression/decompression and raw Win32 APIs for I/O. The original version of this class provided both a pure VBA path and a `zlib1.dll`/`zlibwapi.dll` path, but I rewrote the whole class to rely solely on `archiveint.dll` because it is more performant.
 *   **Unicode Safe:** Full Unicode support for filenames and paths, including CJK and other non‑ASCII characters - even emojis if you're feeling adventurous.
@@ -71,7 +71,7 @@ End Sub
 ```
 
 > [!CAUTION]
-> Legal note: This is covered off in the MIT License (see below/attached/to the side), but it is worth reiterating: ChibiArc is provided entirely "as is". No warranty, express or implied, is given. If you use this in production, you do so at your own risk and with my deepest sympathy.
+> Legal note: This is covered off in the MIT License (see below/attached/to the side/over there), but it is worth reiterating: ChibiArc is provided entirely "as is". No warranty, express or implied, is given. If you use this in production, you do so at your own risk and with my deepest sympathy.
 
 ## A 'quick' note about encryption: ZipCrypto vs AES
 
@@ -162,11 +162,11 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 
 * **AES requires compatible tools** - Again, Windows Explorer cannot extract AES‑encrypted ZIPs. Recipients will need 7‑Zip, WinZip, or **ChibiArc**.
 
-* **RAR and CAB are read‑only** - Libarchive can read RAR/RAR5 and CAB, but cannot write them. CAB write support can theoretically be added if needed.
+* **RAR is read‑only** - Libarchive can read RAR/RAR5, but cannot write them.
 
 ---
 
-## Credits
+## Credits and acknowledgements
 
 ChibiArc was created by Kallun Willock (me).
 
@@ -175,6 +175,12 @@ ChibiArc was created by Kallun Willock (me).
 <https://www.vbforums.com/showthread.php?894163-VB6-Decompress-gzip-stream-with-libarchive-on-Win10>
 * I would commend his ZipArchive solution to 32-bit users: <https://github.com/wqweto/ZipArchive/>
 * I was also inspired by **Cristian Buse's Excel ZipTools** repo: <https://github.com/cristianbuse/Excel-ZipTools/>
+* The CAB code was modeled after the work of those in the VB6 community - namely, [HackerVlad](https://www.vbforums.com/member.php?315508-HackerVlad) and [Fafalone](https://github.com/fafalone/): see
+<https://www.vbforums.com/showthread.php?909105-RESOLVED-The-CAB-Archive-packaging-module>
+* Sancarn for the thunks used to implement CAB write support via the native Windows FCI API.
+* DecimalTurn for investigating and fixing source code encoding issues.
+* GCuser99 for testing twinBASIC 64-bit compatibility and providing fixes for compilation warnings.
+* GHRyunosuke for the reminder that 32-bit compatibility is still a thing.
 * I also made the mascot image myself, entirely in the graphical powerhouse that is Excel.
   
 ---
@@ -190,6 +196,7 @@ ChibiArc was created by Kallun Willock (me).
 
 ## Changelog
 
+* 1.2: Added CAB write support
 * 1.1: Added ISO write support and ISO mount/dismount helpers
 * 1.0: Initial public release
 
