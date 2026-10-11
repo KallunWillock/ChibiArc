@@ -12,6 +12,7 @@ ChibiArc is a single-class VBA module for reading and writing archive files - ZI
 *   **Multi-Format Support:** It reads and writes a myriad of file formats (some of which I've never heard of), but importantly, this includes read/write ZIP, 7-Zip, TAR, and ISO. CAB is also supported for both read and write operations. The CAB write support leverages the native Windows `cabinet.dll` File Compression Interface (FCI) via in-memory machine code thunks. 
 *   **AES Encryption:** Courtesy of the great work of WQWeto, I have adapted his encryption work and shoehorned it into the class to allow for AES-128, AES-192, and AES-256 encryption.
 *   **High Performance:** Leverages `libarchive` for compression/decompression and raw Win32 APIs for I/O. The original version of this class provided both a pure VBA path and a `zlib1.dll`/`zlibwapi.dll` path, but I rewrote the whole class to rely solely on `archiveint.dll` because it is more performant.
+*   **Easy Stream Compression/Decompression:** Direct access to widely-used algorithms (`GZIP` and `zlib`) via `CompressBytes` and `DecompressBytes`, with automatic format detection for common headers.
 *   **Unicode Safe:** Full Unicode support for filenames and paths, including CJK and other non‑ASCII characters - even emojis if you're feeling adventurous.
 *   **ISO Helpers:** Routines to mount and dismount ISO images as virtual drives.
 
@@ -73,6 +74,48 @@ End Sub
 > [!CAUTION]
 > Legal note: This is covered off in the MIT License (see below/attached/to the side/over there), but it is worth reiterating: ChibiArc is provided entirely "as is". No warranty, express or implied, is given. If you use this in production, you do so at your own risk and with my deepest sympathy.
 
+## Compression toolkit: byte-stream support
+
+ChibiArc also includes direct byte-array compression/decompression routines that I completely plagiarised from my vbaSquash project, so you do not need to create an archive just to use a compression routine. I've written even more about it over at: https://github.com/KallunWillock/vbasquash
+
+I find it helpful. I hope others do too.
+
+### Supported algorithms
+
+* `caDeflate` - raw DEFLATE (RFC 1951)
+* `caGzip` - GZIP (RFC 1952)
+* `caZlib` - zlib (RFC 1950)
+* `caMSZIP` - cabinet.dll MSZIP
+* `caXPRESS` - cabinet.dll XPRESS
+* `caXPRESS_HUFF` - cabinet.dll XPRESS + Huffman
+* `caLZMS` - cabinet.dll LZMS
+* `caRTL_LZNT1` - ntdll.dll LZNT1
+* `caRTL_XPRESS` - ntdll.dll XPRESS
+* `caRTL_XPRESS_HUFFMAN` - ntdll.dll XPRESS + Huffman
+
+For the Windows-native `RTL_*` algorithms, the class accepts an optional `NtCompressionEngine` value (`COMPRESSION_ENGINE_STANDARD` or `COMPRESSION_ENGINE_MAXIMUM`).
+
+### Auto-detection
+
+`DecompressBytes` can auto-detect certain of the algorithms when the input includes the expected header information. This is especially handy for `cabinet.dll` and `ntdll.dll` output that carries a small, identifying header, so you do not need to manually specify the algorithm every time.
+
+### Example
+
+```vba
+Dim arc As New ChibiArc
+Dim source() As Byte
+Dim compressed() As Byte
+Dim restored() As Byte
+
+source = StrConv("Hello from ChibiArc", vbFromUnicode)
+compressed = arc.CompressBytes(source, caGzip)
+restored = arc.DecompressBytes(compressed, caGzip)
+
+Debug.Print StrConv(restored, vbUnicode)
+```
+
+This gives you quick access to common compression primitives without needing to wrap everything in a ZIP or TAR archive.
+
 ## A 'quick' note about encryption: ZipCrypto vs AES
 
 This is where things get slightly nuanced. `ChibiArc` supports two encryption methods for ZIP files: ZipCrypto and AES (128/192/256). They are **not** interchangeable, and choosing between them is one of those rare cases where the maxim "bigger is better" is not necessarily true.
@@ -94,6 +137,17 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 > [!NOTE]
 > For those playing along at home, here is one point worth noting: the Windows build of archiveint.dll handles ZipCrypto end-to-end (both reading and writing), but it cannot write AES-encrypted ZIPs. For AES, ChibiArc uses an encryption pipeline (adapted from wqweto's genius VB6/VBA AES implementation) while still leveraging libarchive for DEFLATE compression. Reading AES archives works fine through libarchive regardless - it's only the write path that needed the custom VBA layer. Invariably, someone far smarter than I will point out that the method I've adopted is not best practice and/or is brittle, and they may well be right. It does, however, **seem** to work, which is (almost always) good enough for me.
 
+## Format support at a glance
+
+| Format | Read | Write | Notes |
+| :--- | :--- | :--- | :--- |
+| ZIP | Yes | Yes | AES and ZipCrypto support when using the archive layer |
+| 7-Zip / CPIO / XAR | Yes | Yes |  |
+| ISO | Yes | Yes | Includes mount/dismount helpers |
+| CAB | Yes | Yes | Native Windows FCI-based write support |
+| TAR / USTAR / GNU / PAX | Yes | Yes | Multiple TAR variants supported |
+| RAR / RAR5 | Yes | No | Read-only via libarchive |
+
 ## API Overview
 
 ### Write Mode
@@ -101,13 +155,13 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 | :--- | :--- |
 | `NewFile(Path, [Type], [Pass])` | Initialise a new archive |
 | `Add(Source, [Dest])` | Queue files, folders, byte arrays, or in-memory data |
-| `AddNew(Name, [ParentPath])` | Queue a new empty entry for later writing |
+| `AddNew(Name, [ParentPath])` | Queue a new empty folder for later writing |
 | `SaveFile()` | Write queued items to disk and close |
 | `Encryption` | Set to `aeNone`, `aeZipCrypto`, `aeAes128`, `aeAes192`, or `aeAes256` |
 | `PassPhrase` | Password used for AES or ZipCrypto encryption |
 | `CompressionLevel` | Set compression level (0-9) - 6 is a sensible default |
 | `ConflictMode` | Choose how duplicate entry names are handled: Reject, Overwrite, or Rename |
-| `SkipCompressedFileTypes` | Skip a second compression pass for already-compressed files |
+| `SkipCompressedFileTypes` | Skip a second compression pass for already-compressed files (NB: this only affects AES-encrypted ZIP files) |
 
 ### Read Mode
 | Method | Description |
@@ -118,26 +172,34 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 | `ExtractAll(Path)` | Extract all entries to a folder |
 | `CloseFile()` | Close the archive handle |
 
+### Compression/Decompression
+| Method | Description |
+| :--- | :--- |
+| `CompressBytes(Data, Algorithm, [NtCompressionEngine])` | Compress a byte array using the specified algorithm |
+| `DecompressBytes(Data, [Algorithm], [OriginalSize])` | Decompress a byte array. Can attempt to auto-detect the compression algorithm used. |
+| `DetectCompressionAlgorithm(Data)` | Returns the algorithm used to compress a byte array, or -1 if it can't tell. Recognises cabinet.dll and vbaSquash headers, GZIP and zlib. Raw DEFLATE has no header, so you're outta luck there! |
+
 ### ISO helpers
 | Method | Description |
 | :--- | :--- |
 | `MountISO(Path, [ReadOnly], [AutoDriveLetter])` | Mount an ISO image as a virtual drive |
 | `MountISOToLetter(Path, DriveLetter, [ReadOnly])` | Mount an ISO image to a specific drive letter |
-| `DismountISO([Force])` | Detach the currently mounted ISO |
+| `DismountISO()` | Detach the currently mounted ISO |
 | `ListMountedISOs()` | Returns a list of currently mounted ISO paths |
 | `IsISOMounted([Path])` | Check whether an ISO image is currently mounted |
 
 ### Properties
 | Property | Description |
 | :--- | :--- |
-| `FileCount` | Number of files in the archive |
-| `FolderCount` | Number of folders in the archive |
+| `FileCount` | Number of files in the archive... |
+| `FolderCount` | ... I mean ... |
 | `CompressedSize` | Total compressed size of all entries |
-| `UncompressedSize` | Total uncompressed size of all entries |
+| `UncompressedSize` | ... you'll never, ever guess ... |
 | `CompressionRatio` | Ratio of compressed vs uncompressed size |
 | `IsEncrypted` | True if the archive contains encrypted entries |
-| `ConflictMode` | How duplicate entry names are handled during Add: Reject, Overwrite, or Rename |
+| `ConflictMode` | How duplicate entry names are handled during Add: Reject, Overwrite, or Rename. Very handy. |
 | `LastError` | Detailed error message from the last operation |
+| `OperationReport` | A line-by-line summary of what happened to each entry during the most recent `SaveFile` or `ExtractAll` call |
 | `LastOperationTime` | Duration of the last SaveFile/ExtractAll operation (in seconds) |
 | `LogLevel` | Logging verbosity |
 | `ProgressInterval` | Number of entries between `ProgressEvent` notifications. The default is to raise the event for every entry |
@@ -150,17 +212,15 @@ Alternatively, and unsurprisingly, the recipient can use ChibiArc.
 | `IsoMounted` | Raised when an ISO image is mounted |
 | `IsoDismounted` | Raised when an ISO image is dismounted |
 
-> [!NOTE]
-> This is not an exhaustive list; it's just slightly truncated because I'm exhausted writing it.
-
 ## Limitations
+
 * **No Zip64 support** - Effectively, this caps maximum archive size at roughly 2 GB depending on entry layout. I personally have never seen a zip file even close to that size, and I query whether one should/could rely on VBA for anything of the sort.
 
-* **ISO naming is constrained** - ChibiArc can now write ISO images, but ISO9660/Joliet rules remain restrictive. An entry with a name entirely in non-ASCII (e.g.: a Chinese/Japanese/Korean script-only folder name) is now rejected with a clear error rather than being silently dropped, so you do not lose data without knowing about it. Mixed names seem to be fine. Use ZIP or 7-Zip if you need unrestricted non-ASCII naming.
+* **ISO naming is constrained** - ChibiArc can now write ISO images, but ISO9660/Joliet rules remain restrictive. An entry with a name entirely in non-ASCII (e.g.: a Chinese/Japanese/Korean script-only folder name) is now rejected with a clear error rather than being silently dropped, so you do not lose data without knowing about it. Mixed names seem to be fine. 
 
-* **Windows‑only** - ChibiArc depends on `archiveint.dll`, the Windows implementation for libarchive. It ships with later versions of Windows 10+ apparently, but is not available on macOS. That said, ChibiArc is the current incarnation of a pure-VBA version, so I may eventually dust off and update that version and add that to the repo. It will rely on Cristian Buse's VBA-MemoryTools code (https://github.com/cristianbuse/VBA-MemoryTools).
+* **Windows-only** - ChibiArc depends on `archiveint.dll`, the Windows implementation for libarchive. It ships with later versions of Windows 10+ apparently, but is not available on macOS. That said, ChibiArc is the current incarnation of a pure-VBA version, so I may eventually dust off and update that version and add that to the repo. It will rely on Cristian Buse's VBA-MemoryTools code (https://github.com/cristianbuse/VBA-MemoryTools).
 
-* **AES requires compatible tools** - Again, Windows Explorer cannot extract AES‑encrypted ZIPs. Recipients will need 7‑Zip, WinZip, or **ChibiArc**.
+* **AES requires compatible tools** - Again, Windows Explorer cannot extract AES‑encrypted ZIPs. Recipients will need 7‑Zip, WinZip, or... (drum roll) **ChibiArc**!
 
 * **RAR is read‑only** - Libarchive can read RAR/RAR5, but cannot write them.
 
@@ -181,21 +241,29 @@ ChibiArc was created by Kallun Willock (me).
 * DecimalTurn for investigating and fixing source code encoding issues.
 * GCuser99 for testing twinBASIC 64-bit compatibility and providing fixes for compilation warnings.
 * GHRyunosuke for the reminder that 32-bit compatibility is still a thing.
+* [vbaSquash](https://github.com/KallunWillock/vbaSquash/): my project from which I shamelessly stole the compression/decompression routines.
 * I also made the mascot image myself, entirely in the graphical powerhouse that is Excel.
   
 ---
 
 ## References / resources
 
+* "ZLIB Compressed Data Format Specification version 3.3" - <https://www.rfc-editor.org/rfc/rfc1950.txt>
+* "DEFLATE Compressed Data Format Specification version 1.3" - <https://www.rfc-editor.org/rfc/rfc1951.txt>
+* "GZIP file format specification version 4.3" - <https://www.rfc-editor.org/rfc/rfc1952.txt>
+
 * LibArchive: <https://github.com/libarchive/libarchive/>
 * PKWARE APPNOTE (ZIP File Format Specification): <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>  
   The canonical reference for ZIP structures, headers, Zip64, and traditional ZipCrypto.
 * WinZip AES encryption specification: <http://www.winzip.com/aes_info.htm>
+* Microsoft CAB File Compression Interface (FCI) documentation: <https://learn.microsoft.com/en-us/windows/win32/api/fci/>
+* Microsoft ISO mounting API documentation: <https://learn.microsoft.com/en-us/windows/win32/api/virtdisk/>
 
 ---
 
 ## Changelog
 
+* 2.0: Added the vbaSquash compression/decompression toolkit, direct `CompressBytes`/`DecompressBytes` access, header auto-detection, the FCI thunk hardening fix, Fixed a bug where files over 512 KB were truncated when writing non-AES archives.
 * 1.2: Added CAB write support
 * 1.1: Added ISO write support and ISO mount/dismount helpers
 * 1.0: Initial public release

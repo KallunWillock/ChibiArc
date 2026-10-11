@@ -8,7 +8,7 @@ Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = False
 Attribute VB_Exposed = False
 '  |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
-'  |||||||||||||||||||||||||||  ChibiArc (v1.2)   ||||||||||||||||||||||||||||||||
+'  |||||||||||||||||||||||||||  ChibiArc (v2.0)   ||||||||||||||||||||||||||||||||
 '  |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 '
 '  AUTHOR:   Kallun Willock
@@ -16,13 +16,17 @@ Attribute VB_Exposed = False
 '  URL:      https://github.com/KallunWillock/ChibiArc
 '
 '  NOTES:    * Unified archive read/write class for VBA, backed by archiveint.dll
-'              (libarchive) for broad format support.
+'              (Microsoft's libarchive build) for broad format support.
 '            * Reads:  ZIP, 7-Zip, TAR (all variants), CPIO, XAR, ISO, CAB, RAR/RAR5.
 '            * Writes: ZIP, 7-Zip, TAR (ustar / PAX / PAX-restricted / GNU), CPIO, XAR,
 '              and ISO (basic ISO9660/Joliet-style output via libarchive).
 '            * ZIP encryption: AES-128/192/256 and also Windows Explorer-compatible
 '              ZipCrypto (via libarchive).
 '            * DEFLATE compression via archiveint.dll gzip filter (levels 0-9).
+'            * Compression toolkit (v2.0): CompressBytes / DecompressBytes comprises
+'              ten stream algorithms - DEFLATE, GZIP, zlib (archiveint.dll),
+'              MSZIP, XPRESS, XPRESS+Huffman, LZMS (cabinet.dll), and RTL LZNT1,
+'              XPRESS, XPRESS+Huffman (ntdll.dll), with header auto-detection.
 '            * Accepts files, folders (recursive), byte arrays, and string/variant arrays.
 '            * Lazy scan cache - archive header is read only once on first access.
 '            * Conflict resolution: Reject / Overwrite / Rename (auto-numbered). Useful when
@@ -31,8 +35,6 @@ Attribute VB_Exposed = False
 '            * Requires archiveint.dll, which ships with Win10+(ver?).
 '            * Adds basic Windows ISO mount/dismount helpers for working with ISO images
 '              as virtual disks.
-'
-'  REQUIRES: archiveint.dll, bcrypt.dll, kernel32, advapi32, Scripting.Dictionary
 '
 '  CREDITS:  * AES encryption adapted from wqweto's VB6/VBA AES implementation:
 '                 https://www.vbforums.com/showthread.php?862103
@@ -44,7 +46,16 @@ Attribute VB_Exposed = False
 '                 https://github.com/sancarn/stdVBA-Inspiration/tree/master/AddressOfThunkForComProc/
 '              of Elroy's VB6 code (and The Trick, Wqweto, Dz32, Fafalone, and LaVolpe):
 '                 https://www.vbforums.com/showthread.php?898136-API-CallBacks-Using-an-Object-s-Procedure
-
+'            * vbaSquash project
+'                  https://github.com/KallunWillock/vbaSquash
+'
+'                  - MSDN - https://docs.microsoft.com/en-us/windows/win32/api/_cmpapi/
+'                  - Frank Schueler - https://foren.activevb.de/archiv/vb-classic/thread-410382/beitrag-410466/Komprimierung-im-BufferMode/
+'                  - Tanner Helland - https://github.com/tannerhelland/VB6-Compression
+'
+'            * "ZLIB Compressed Data Format Specification version 3.3" - https://www.rfc-editor.org/rfc/rfc1950.txt
+'            * "DEFLATE Compressed Data Format Specification version 1.3" - https://www.rfc-editor.org/rfc/rfc1951.txt
+'            * "GZIP file format specification version 4.3" - https://www.rfc-editor.org/rfc/rfc1952.txt -
 '
 '  LICENSE:  MIT
 '
@@ -52,16 +63,23 @@ Attribute VB_Exposed = False
 '            1.1    03/07/2026    Added ISO writing and ISO mount/dismount functionality
 '            1.2    16/08/2026    Added CAB write support - uses thunks courtesy of Sancarn
 '                                 + various fixes to the code
-
+'            2.0    11/10/2026    Integrated vbaSquash to build expanded
+'                                 compression/decompression functionality, along with
+'                                 magic-header auto-detection, fixed callback thunks,
+'                                 Fixed a bug where files over 512 KB were truncated
+'                                 when writing non-AES archives
+'
+'  TODO:     * Add 32-bit compatibility
+'
 Option Explicit
 
-#If VBA7 Then
+#If Win64 Then
   Private Declare PtrSafe Function archive_read_new Lib "archiveint.dll" () As LongPtr
   Private Declare PtrSafe Function archive_read_free Lib "archiveint.dll" (ByVal h As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_close Lib "archiveint.dll" (ByVal h As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_support_format_all Lib "archiveint.dll" (ByVal h As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_support_filter_all Lib "archiveint.dll" (ByVal h As LongPtr) As Long
-  Private Declare PtrSafe Function archive_read_open_filename Lib "archiveint.dll" (ByVal h As LongPtr, ByVal FileName As LongPtr, ByVal blockSize As LongPtr) As Long
+  Private Declare PtrSafe Function archive_read_open_filename Lib "archiveint.dll" (ByVal h As LongPtr, ByVal filename As LongPtr, ByVal blockSize As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_open_memory Lib "archiveint.dll" (ByVal h As LongPtr, ByVal pBuffer As LongPtr, ByVal bufferSize As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_next_header Lib "archiveint.dll" (ByVal h As LongPtr, ByRef hEntry As LongPtr) As Long
   Private Declare PtrSafe Function archive_read_data Lib "archiveint.dll" (ByVal h As LongPtr, ByVal pData As LongPtr, ByVal dataSize As LongPtr) As LongPtr
@@ -72,7 +90,7 @@ Option Explicit
   Private Declare PtrSafe Function archive_write_new Lib "archiveint.dll" () As LongPtr
   Private Declare PtrSafe Function archive_write_free Lib "archiveint.dll" (ByVal arch As LongPtr) As Long
   Private Declare PtrSafe Function archive_write_close Lib "archiveint.dll" (ByVal arch As LongPtr) As Long
-  Private Declare PtrSafe Function archive_write_open_filename Lib "archiveint.dll" (ByVal arch As LongPtr, ByVal FileName As LongPtr) As Long
+  Private Declare PtrSafe Function archive_write_open_filename Lib "archiveint.dll" (ByVal arch As LongPtr, ByVal filename As LongPtr) As Long
   Private Declare PtrSafe Function archive_write_open_memory Lib "archiveint.dll" (ByVal arch As LongPtr, ByVal Buffer As LongPtr, ByVal bufferSize As LongPtr, ByRef usedSize As LongPtr) As Long
   Private Declare PtrSafe Function archive_write_header Lib "archiveint.dll" (ByVal arch As LongPtr, ByVal entry As LongPtr) As Long
   Private Declare PtrSafe Function archive_write_data Lib "archiveint.dll" (ByVal arch As LongPtr, ByVal pData As LongPtr, ByVal dataSize As Long) As LongPtr
@@ -126,7 +144,7 @@ Option Explicit
   Private Declare PtrSafe Function archive_position_compressed Lib "archiveint.dll" (ByVal h As LongPtr) As LongLong
   Private Declare PtrSafe Function archive_position_uncompressed Lib "archiveint.dll" (ByVal h As LongPtr) As LongLong
   
-  Private Declare PtrSafe Function apiCreateFileW Lib "kernel32" Alias "CreateFileW" (ByVal lpFileName As LongPtr, ByVal dwDesiredAccess As Long, ByVal dwShareMode As Long, ByVal lpSecurityAttributes As LongPtr, ByVal dwCreationDisposition As Long, ByVal dwFlagsAndAttributes As Long, ByVal hTemplateFile As LongPtr) As LongPtr
+  Private Declare PtrSafe Function apiCreateFile Lib "kernel32" Alias "CreateFileW" (ByVal lpFileName As LongPtr, ByVal dwDesiredAccess As Long, ByVal dwShareMode As Long, ByVal lpSecurityAttributes As LongPtr, ByVal dwCreationDisposition As Long, ByVal dwFlagsAndAttributes As Long, ByVal hTemplateFile As LongPtr) As LongPtr
   Private Declare PtrSafe Function OpenVirtualDisk Lib "VirtDisk.dll" (ByVal VirtualStorageType As LongPtr, ByVal path As LongPtr, ByVal VirtualDiskAccessMask As Long, ByVal flags As Long, ByVal Parameters As LongPtr, ByRef hHandle As LongPtr) As Long
   Private Declare PtrSafe Function AttachVirtualDisk Lib "VirtDisk.dll" (ByVal VirtualDiskHandle As LongPtr, ByVal SecurityDescriptor As LongPtr, ByVal flags As Long, ByVal ProviderSpecificFlags As Long, ByVal Parameters As LongPtr, ByVal Overlapped As LongPtr) As Long
   Private Declare PtrSafe Function DetachVirtualDisk Lib "VirtDisk.dll" (ByVal VirtualDiskHandle As LongPtr, ByVal flags As Long, ByVal ProviderSpecificFlags As Long) As Long
@@ -135,15 +153,18 @@ Option Explicit
   Private Declare PtrSafe Function GetVolumeNameForVolumeMountPointW Lib "kernel32.dll" (ByVal lpszVolumeMountPoint As LongPtr, ByVal lpszVolumeName As LongPtr, ByVal cchBufferLength As Long) As Long
   Private Declare PtrSafe Function GetVolumePathNamesForVolumeNameW Lib "kernel32.dll" (ByVal lpszVolumeName As LongPtr, ByVal lpszVolumePathNames As LongPtr, ByVal cchBufferLength As Long, ByRef lpcchReturnLength As Long) As Long
   Private Declare PtrSafe Function SetVolumeMountPointW Lib "kernel32.dll" (ByVal lpszVolumeMountPoint As LongPtr, ByVal lpszVolumeName As LongPtr) As Long
+  Private Declare PtrSafe Function DeleteVolumeMountPointW Lib "kernel32.dll" (ByVal lpszVolumeMountPoint As LongPtr) As Long
   Private Declare PtrSafe Function CLSIDFromString Lib "ole32.dll" (ByVal pString As LongPtr, ByRef pclsid As GUID) As Long
   Private Declare PtrSafe Function apiReadFile Lib "kernel32" Alias "ReadFile" (ByVal hFile As LongPtr, ByRef lpBuffer As Byte, ByVal nNumberOfBytesToRead As Long, ByRef lpNumberOfBytesRead As Long, ByVal lpOverlapped As LongPtr) As Long
   Private Declare PtrSafe Function apiWriteFile Lib "kernel32" Alias "WriteFile" (ByVal hFile As LongPtr, ByRef lpBuffer As Byte, ByVal nBytes As Long, ByRef lpBytesWritten As Long, ByVal lpOverlapped As LongPtr) As Long
   Private Declare PtrSafe Function apiCloseHandle Lib "kernel32" Alias "CloseHandle" (ByVal hObject As LongPtr) As Long
-  Private Declare PtrSafe Function apiGetFileSizeEx Lib "kernel32" Alias "GetFileSizeEx" (ByVal hFile As LongPtr, ByRef lpFileSize As Currency) As Long
+  Private Declare PtrSafe Function apiGetFileSizeEx Lib "kernel32" Alias "GetFileSizeEx" (ByVal hFile As LongPtr, ByRef lpFileSize As LARGE_INTEGER) As Long
   Private Declare PtrSafe Function apiGetFileAttributesW Lib "kernel32" Alias "GetFileAttributesW" (ByVal lpFileName As LongPtr) As Long
   Private Declare PtrSafe Function apiDeleteFileW Lib "kernel32" Alias "DeleteFileW" (ByVal lpFileName As LongPtr) As Long
   Private Declare PtrSafe Function apiCreateDirectoryW Lib "kernel32" Alias "CreateDirectoryW" (ByVal lpPathName As LongPtr, ByVal lpSecurityAttributes As LongPtr) As Long
   Private Declare PtrSafe Function SetFilePointer Lib "kernel32" (ByVal hFile As LongPtr, ByVal lDistanceToMove As Long, ByVal lpDistanceToMoveHigh As LongPtr, ByVal dwMoveMethod As Long) As Long
+  Private Declare PtrSafe Function apiSetFilePointerEx Lib "kernel32" Alias "SetFilePointerEx" (ByVal hFile As LongPtr, ByVal liDistanceToMove As LongLong, ByRef lpNewFilePointer As LongLong, ByVal dwMoveMethod As Long) As Long
+  Private Declare PtrSafe Function apiSetEndOfFile Lib "kernel32" Alias "SetEndOfFile" (ByVal hFile As LongPtr) As Long
   Private Declare PtrSafe Function apiFindFirstFileW Lib "kernel32" Alias "FindFirstFileW" (ByVal lpFileName As LongPtr, lp_FindFileData As WIN32_FIND_DATA) As LongPtr
   Private Declare PtrSafe Function apiFindNextFileW Lib "kernel32" Alias "FindNextFileW" (ByVal hFindFile As LongPtr, lp_FindFileData As WIN32_FIND_DATA) As Long
   Private Declare PtrSafe Function apiFindClose Lib "kernel32" Alias "FindClose" (ByVal hFindFile As LongPtr) As Long
@@ -179,18 +200,45 @@ Option Explicit
   Private Declare PtrSafe Function GlobalFree Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
   Private Declare PtrSafe Function VirtualAlloc Lib "kernel32" (ByVal lpAddress As LongPtr, ByVal dwSize As LongPtr, ByVal flAllocationType As Long, ByVal flProtect As Long) As LongPtr
   Private Declare PtrSafe Function VirtualFree Lib "kernel32" (ByVal lpAddress As LongPtr, ByVal dwSize As LongPtr, ByVal dwFreeType As Long) As Long
+  Private Declare PtrSafe Function VirtualProtect Lib "kernel32" (ByVal lpAddress As LongPtr, ByVal dwSize As LongPtr, ByVal flNewProtect As Long, ByRef lpflOldProtect As Long) As Long
+  Private Declare PtrSafe Function FlushInstructionCache Lib "kernel32" (ByVal hProcess As LongPtr, ByVal lpBaseAddress As LongPtr, ByVal dwSize As LongPtr) As Long
+  Private Declare PtrSafe Function GetCurrentProcess Lib "kernel32" () As LongPtr
   Private Declare PtrSafe Function GetTempPathW Lib "kernel32" (ByVal nBufferLength As Long, ByVal lpBuffer As LongPtr) As Long
   Private Declare PtrSafe Function GetTempFileNameW Lib "kernel32" (ByVal lpPathName As LongPtr, ByVal lpPrefixString As LongPtr, ByVal uUnique As Long, ByVal lpTempFileName As LongPtr) As Long
   Private Declare PtrSafe Function FCICreate Lib "cabinet.dll" (ByRef perf As erf, ByVal pfnfiledest As LongPtr, ByVal pfnalloc As LongPtr, ByVal pfnfree As LongPtr, ByVal pfnopen As LongPtr, ByVal pfnread As LongPtr, ByVal pfnwrite As LongPtr, ByVal pfnclose As LongPtr, ByVal pfnseek As LongPtr, ByVal pfndelete As LongPtr, ByVal pfngettempfile As LongPtr, ByRef pccab As CCAB, ByVal pv As LongPtr) As LongPtr
   Private Declare PtrSafe Function FCIAddFile Lib "cabinet.dll" (ByVal hfci As LongPtr, ByVal pszSourceFile As String, ByVal pszFileName As String, ByVal fExecute As Long, ByVal pfnfcignc As LongPtr, ByVal pfnfcis As LongPtr, ByVal pfnfcigoi As LongPtr, ByVal typeCompress As Integer) As Long
   Private Declare PtrSafe Function FCIFlushCabinet Lib "cabinet.dll" (ByVal hfci As LongPtr, ByVal fGetNextCab As Long, ByVal pfnfcignc As LongPtr, ByVal pfnfcis As LongPtr) As Long
   Private Declare PtrSafe Function FCIDestroy Lib "cabinet.dll" (ByVal hfci As LongPtr) As Long
+  
+  ' File IO for the FCI callbacks below reuses the existing apiCreateFile,
+  ' apiReadFile, apiWriteFile, apiCloseHandle, apiDeleteFileW,
+  ' apiGetFileAttributesW, apiFileTimeToLocalFileTime, and SetFilePointer
+  ' declared above, rather than redeclaring ANSI equivalents. FCI's own
+  ' callback contract (pszFile, pszName, pszTempName) is unavoidably ANSI,
+  ' that is inherent to the legacy Cabinet API and cannot be changed here,
+  ' see fStringFromPtrA below, but every actual OS call made ourselves now
+  ' goes through the same Unicode path as the rest of the class.
+  
   Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (ByRef Destination As Any, ByRef Source As Any, ByVal length As LongPtr)
   Private Declare PtrSafe Sub CopyMemoryByPtr Lib "kernel32" Alias "RtlMoveMemory" (ByVal Destination As LongPtr, Source As Any, ByVal length As LongPtr)
   Private Declare PtrSafe Sub CopyMemoryByAddr Lib "kernel32" Alias "RtlMoveMemory" (ByRef Destination As Any, ByVal Source As LongPtr, ByVal length As LongPtr)
 
+  Private Declare PtrSafe Function CreateCompressor Lib "cabinet" (ByVal Algorithm As Long, ByVal AllocationRoutines As LongPtr, ByRef hCompressor As LongPtr) As Long
+  Private Declare PtrSafe Function CompressAPI Lib "cabinet" Alias "Compress" (ByVal hCompressor As LongPtr, ByVal UncompressedData As LongPtr, ByVal UncompressedDataSize As LongPtr, ByVal CompressedBuffer As LongPtr, ByVal CompressedBufferSize As LongPtr, ByRef CompressedDataSizeRequired As LongPtr) As Long
+  Private Declare PtrSafe Function CloseCompressor Lib "cabinet" (ByVal hCompressor As LongPtr) As Long
+  Private Declare PtrSafe Function CreateDecompressor Lib "cabinet" (ByVal Algorithm As Long, ByVal AllocationRoutines As LongPtr, ByRef hDecompressor As LongPtr) As Long
+  Private Declare PtrSafe Function DecompressAPI Lib "cabinet" Alias "Decompress" (ByVal hDecompressor As LongPtr, ByVal CompressedData As LongPtr, ByVal CompressedDataSize As LongPtr, ByVal UncompressedBuffer As LongPtr, ByVal UncompressedBufferSize As LongPtr, ByRef UncompressedDataSizeRequired As LongPtr) As Long
+  Private Declare PtrSafe Function CloseDecompressor Lib "cabinet" (ByVal hDecompressor As LongPtr) As Long
+
+  ' ntdll.dll - RTL Compression (LZNT1, XPRESS, XPRESS_HUFF)
+  ' Workspace allocation reuses the existing VirtualAlloc/VirtualFree above.
+  Private Declare PtrSafe Function RtlGetCompressionWorkSpaceSize Lib "ntdll" (ByVal CompressionFormatAndEngine As Long, ByRef CompressBufferWorkSpaceSize As Long, ByRef CompressFragmentWorkSpaceSize As Long) As Long
+  Private Declare PtrSafe Function RtlCompressBuffer Lib "ntdll" (ByVal CompressionFormatAndEngine As Long, ByVal UncompressedBuffer As LongPtr, ByVal UncompressedBufferSize As Long, ByVal CompressedBuffer As LongPtr, ByVal CompressedBufferSize As Long, ByVal UncompressedChunkSize As Long, ByRef FinalCompressedSize As Long, ByVal WorkSpace As LongPtr) As Long
+  Private Declare PtrSafe Function RtlDecompressBuffer Lib "ntdll" (ByVal CompressionFormat As Long, ByVal UncompressedBuffer As LongPtr, ByVal UncompressedBufferSize As Long, ByVal CompressedBuffer As LongPtr, ByVal CompressedBufferSize As Long, ByRef FinalUncompressedSize As Long) As Long
+  Private Declare PtrSafe Function RtlDecompressBufferEx Lib "ntdll" (ByVal CompressionFormat As Long, ByVal UncompressedBuffer As LongPtr, ByVal UncompressedBufferSize As Long, ByVal CompressedBuffer As LongPtr, ByVal CompressedBufferSize As Long, ByRef FinalUncompressedSize As Long, ByVal WorkSpace As LongPtr) As Long
+
 #Else
-  ' 32-bit compatibility planned for v1.1
+  ' 32-bit compatibility planned for v3
   ' However, I would recommend users to Wqweto's ZipArchive solution:
   ' https://github.com/wqweto/ZipArchive/
   ' and to Cristian Buse's excellent unzip routines for both 32bit and 64bit in:
@@ -201,29 +249,29 @@ Public Enum ArcType
   atAuto = 0
   atZip = 1
   at7Zip = 2
-  atTar = 3       ' ustar - read/write; 100-char path limit, ASCII only
-  atTarGz = 4     ' ustar + gzip
-  atTarBz2 = 5    ' ustar + bzip2
-  atTarXz = 6     ' ustar + xz
-  atTarZst = 7    ' ustar + zstd
-  atTarPax = 8    ' PAX - read/write; unlimited paths, UTF-8, preferred for new archives
+  atTar = 3               ' ustar - read/write; 100-char path limit, ASCII only
+  atTarGz = 4             ' ustar + gzip
+  atTarBz2 = 5            ' ustar + bzip2
+  atTarXz = 6             ' ustar + xz
+  atTarZst = 7            ' ustar + zstd
+  atTarPax = 8            ' PAX - read/write; unlimited paths, UTF-8, preferred for new archives
   atTarPaxRestricted = 9  ' PAX restricted - emits PAX headers only when necessary
-  atTarGnu = 10   ' GNU tar - read/write; long filenames via GNU extensions
+  atTarGnu = 10           ' GNU tar - read/write; long filenames via GNU extensions
   atCpio = 11
   atXar = 12
   atIso = 13
   atCab = 14
-  atRar = 15      ' read only - RAR apparently requires a commercial licence to generate
-  atRar5 = 16     ' read only - same as above (atRar)
+  atRar = 15               ' read only - RAR apparently requires a commercial licence to generate
+  atRar5 = 16              ' read only - same as above (atRar)
 End Enum
 
 Public Enum ArchiveEncryption
-  aeUnknown = -2      ' encrypted but method could not be determined
-  aeNone = -1         ' no encryption
-  aeZipCrypto = 0     ' traditional ZipCrypto (strength byte not used)
-  aeAes128 = 1        ' WinZip AES-128 (strength byte = 1)
-  aeAes192 = 2        ' WinZip AES-192 (strength byte = 2)
-  aeAes256 = 3        ' WinZip AES-256 (strength byte = 3)
+  aeUnknown = -2           ' encrypted but method could not be determined
+  aeNone = -1              ' no encryption
+  aeZipCrypto = 0          ' traditional ZipCrypto (strength byte not used)
+  aeAes128 = 1             ' WinZip AES-128 (strength byte = 1)
+  aeAes192 = 2             ' WinZip AES-192 (strength byte = 2)
+  aeAes256 = 3             ' WinZip AES-256 (strength byte = 3)
 End Enum
 
 Public Enum ArcLogLevel
@@ -231,11 +279,6 @@ Public Enum ArcLogLevel
   logInfo = 1
   logWarning = 2
   logError = 3
-End Enum
-
-Public Enum ArcLogOutput
-  logNone = 0
-  logImmediate = 1
 End Enum
 
 Public Enum ArcConflictMode
@@ -249,6 +292,35 @@ Public Enum ArchiveMode
   arcModeRead = 1
   arcModeWrite = 2
 End Enum
+
+Public Enum CompressionAlgorithm
+  ' Values are deliberate and must not be renumbered. For the cabinet.dll and
+  ' ntdll paths the enum value equals byte 7 of the produced header, and the
+  ' range selects the provider: 2-5 cabinet.dll, 12-14 ntdll.dll. Cabinet
+  ' values also equal the cabinet.dll algorithm ID; ntdll format = value - 10.
+  ' The archiveint formats have no byte-7 scheme (gzip and zlib carry their own
+  ' native magic, raw DEFLATE has none) and sit in their own 20-22 band.
+  caMSZIP = 2                ' cabinet.dll - byte 7 = 2, API ID = 2
+  caXPRESS = 3               ' cabinet.dll - byte 7 = 3, API ID = 3
+  caXPRESS_HUFF = 4          ' cabinet.dll - byte 7 = 4, API ID = 4
+  caLZMS = 5                 ' cabinet.dll - byte 7 = 5, API ID = 5
+  caRTL_LZNT1 = 12           ' ntdll.dll   - byte 7 = 12, format = 2
+  caRTL_XPRESS = 13          ' ntdll.dll   - byte 7 = 13, format = 3
+  caRTL_XPRESS_HUFFMAN = 14  ' ntdll.dll   - byte 7 = 14, format = 4
+  caDeflate = 20             ' archiveint.dll - raw DEFLATE (RFC 1951)
+  caGzip = 21                ' archiveint.dll - GZIP (RFC 1952)
+  caZlib = 22                ' archiveint.dll - zlib (RFC 1950)
+End Enum
+
+Public Enum NtCompressionEngine
+  COMPRESSION_ENGINE_STANDARD = 0
+  COMPRESSION_ENGINE_MAXIMUM = 256
+End Enum
+
+Private Type LARGE_INTEGER
+  LowPart  As Long
+  HighPart As Long
+End Type
 
 Private Type GUID
   Data1 As Long
@@ -302,18 +374,18 @@ Private Type ATTACH_VIRTUAL_DISK_PARAMETERS
 End Type
 
 Private Type QueueEntry
-  Name            As String   ' path as it will appear inside the archive
+  name            As String   ' path as it will appear inside the archive
   SourcePath      As String   ' disk path (empty if Data() is populated)
   data()          As Byte     ' in-memory payload (used when SourcePath = "")
-  isFolder        As Boolean
+  IsFolder        As Boolean
   IsStreamed      As Boolean
   ModifiedDate    As Date
   fileSize        As LongLong
 End Type
 
 Private Type ScannedEntry
-  Name              As String
-  isFolder          As Boolean
+  name              As String
+  IsFolder          As Boolean
   UncompressedSize  As LongLong
   ModifiedUnix      As LongLong
 End Type
@@ -356,14 +428,14 @@ End Type
 Private Type ThunkEntry
   ptr As LongPtr
   Size As LongPtr
-  Name As String
+  name As String
 End Type
 
-' Per-entry metadata recorded during the local-file-header pass, then reused
+' Per-entry metadata recorded during the local-file-header pass, Then reused
 ' when writing the central directory.
 Private Type AesFileInfo
-  Name                As String
-  isFolder            As Boolean
+  name                As String
+  IsFolder            As Boolean
   IsEncrypted         As Boolean
   CRC32               As Long
   UncompressedSize    As Long      ' capped at ~2 GB; Zip64 not yet implemented
@@ -387,12 +459,13 @@ End Enum
 
 Private Const CP_UTF8                   As Long = 65001
 Private Const UNIX_EPOCH_OFFSET         As Long = 25569
-Private Const AE_IFREG                  As Long = &H8000&    ' regular file
-Private Const AE_IFDIR                  As Long = &H4000&    ' directory
+Private Const AE_IFREG                  As Long = &H8000&
+Private Const AE_IFDIR                  As Long = &H4000&
 Private Const GENERIC_READ              As Long = &H80000000
 Private Const GENERIC_WRITE             As Long = &H40000000
 Private Const FILE_SHARE_READ           As Long = &H1
 Private Const FILE_SHARE_WRITE          As Long = &H2
+Private Const FILE_SHARE_DELETE         As Long = &H4
 Private Const OPEN_EXISTING             As Long = 3
 Private Const CREATE_ALWAYS             As Long = 2
 
@@ -406,9 +479,9 @@ Private Const FILE_ATTRIBUTE_NORMAL     As Long = &H80
 Private Const INVALID_HANDLE_VALUE      As LongPtr = -1
 Private Const INVALID_SET_FILE_POINTER  As Long = -1
 Private Const INVALID_FILE_ATTRIBUTES   As Long = -1
-Private Const DEFAULT_PERM_FILE         As Long = &H1A4     ' 0644
-Private Const DEFAULT_PERM_DIR          As Long = &H1ED     ' 0755
-Private Const STREAM_CHUNK_SIZE         As Long = 65536     ' 64 KB streaming chunk
+Private Const DEFAULT_PERM_FILE         As Long = &H1A4
+Private Const DEFAULT_PERM_DIR          As Long = &H1ED
+Private Const STREAM_CHUNK_SIZE         As Long = 65536
 
 Private Const S_OK                      As Long = &H0&
 Private Const MAX_PATH                  As Long = 260
@@ -419,6 +492,7 @@ Private Const ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY As Long = &H1&
 Private Const ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER As Long = &H2&
 Private Const ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME As Long = &H4&
 Private Const DETACH_VIRTUAL_DISK_FLAG_NONE As Long = &H0&
+Private Const DETACH_VIRTUAL_DISK_FLAG_FORCE As Long = &H1&
 Private Const VIRTUAL_DISK_ACCESS_READ As Long = &HD0000
 Private Const VIRTUAL_DISK_ACCESS_DETACH As Long = &H40000
 Private Const VIRTUAL_DISK_ACCESS_GET_INFO As Long = &H80000
@@ -442,12 +516,11 @@ Private Const GMEM_FIXED          As Long = 0
 Private Const MEM_COMMIT          As Long = &H1000
 Private Const MEM_RESERVE         As Long = &H2000
 Private Const MEM_RELEASE         As Long = &H8000
-Private Const PAGE_EXECUTE_READWRITE As Long = &H40
+Private Const PAGE_EXECUTE_READ   As Long = &H20      ' thunks: written read-write, then made execute-read
 
 Private Const CC_STDCALL          As Long = 4
 Private Const VT_I8               As Integer = 20
 
-' BCrypt algorithm / property strings
 Private Const BCRYPT_SHA1_ALGORITHM     As String = "SHA1"
 Private Const BCRYPT_AES_ALGORITHM      As String = "AES"
 Private Const MS_PRIMITIVE_PROVIDER     As String = "Microsoft Primitive Provider"
@@ -458,7 +531,35 @@ Private Const BCRYPT_CHAIN_MODE_ECB     As String = "ChainingModeECB"
 Private Const BCRYPT_HASH_LENGTH        As String = "HashDigestLength"
 Private Const LNG_AES_BLOCK_SIZE        As Long = 16
 
-' AES key derivation sizes (salt len = keyLen / 2 per WinZip AES spec)
+' Compression - cabinet.dll buffer-mode magic header (algorithm ID lives at
+' byte 7 and equals the CompressionAlgorithm enum value, so no separate ID
+' constants are needed).
+Private Const CAB_MAGIC_BYTE_0          As Byte = &HA
+Private Const CAB_MAGIC_BYTE_1          As Byte = &H51
+Private Const CAB_MAGIC_BYTE_2          As Byte = &HE5
+Private Const CAB_MAGIC_BYTE_3          As Byte = &HC0
+Private Const CAB_MAGIC_BYTE_4          As Byte = &H18
+Private Const CAB_MAGIC_BYTE_5          As Byte = &H0
+
+' Compression - vbaSquash header magic ("SQUASH") for RTL-produced data
+' "Why 'SQUASH'?", you ask. "Why not?", I respond. Actually, it was the first thing
+' that came to mind when I needed a 6-byte magic for RTL-compressed data. It has no other significance.
+Private Const RTL_MAGIC_BYTE_0          As Byte = &H53   ' S
+Private Const RTL_MAGIC_BYTE_1          As Byte = &H51   ' Q
+Private Const RTL_MAGIC_BYTE_2          As Byte = &H55   ' U
+Private Const RTL_MAGIC_BYTE_3          As Byte = &H41   ' A
+Private Const RTL_MAGIC_BYTE_4          As Byte = &H53   ' S
+Private Const RTL_MAGIC_BYTE_5          As Byte = &H48   ' H
+
+' Compression - memory / status flags (MEM_COMMIT/RESERVE/RELEASE reused from above)
+Private Const PAGE_READWRITE            As Long = &H4
+Private Const STATUS_SUCCESS            As Long = 0
+
+' Compression - zlib (RFC 1950) framing bytes
+Private Const RFC1950_HEADER_BYTE_0     As Byte = &H78
+Private Const RFC1950_HEADER_BYTE_1     As Byte = &H9C
+
+' AES key derivation sizes (salt len = keyLen / 2 per as per the WinZip AES spec)
 Private Const AES128_KEY_LEN    As Long = 16
 Private Const AES192_KEY_LEN    As Long = 24
 Private Const AES256_KEY_LEN    As Long = 32
@@ -474,6 +575,7 @@ Private Const GZIP_FOOTER_LEN   As Long = 8
 
 Private Const tcompTYPE_NONE    As Integer = 0
 Private Const tcompTYPE_MSZIP   As Integer = 1
+Private Const tcompTYPE_LZX_21 As Integer = &H1503  ' To-do: add to note
 
 Private m_Mode                  As ArchiveMode
 Private m_Type                  As ArcType
@@ -484,7 +586,7 @@ Private m_SourceFile            As String
 Private m_Passphrase            As String
 Private m_Queue()               As QueueEntry
 Private m_QueueCount            As Long
-Private m_FolderIndex           As Object   ' Scripting.Dictionary + folder name hash set
+Private m_FolderIndex           As Object    ' Scripting.Dictionary + folder name hash set
 Private m_Encryption            As ArchiveEncryption
 Private m_CompressionLevel      As Long
 Private m_SkipCompressedTypes   As Boolean
@@ -507,6 +609,7 @@ Private m_ArchiveIntAvailable   As Boolean
 Private m_LastOperationTime     As Double
 Private m_MountedIsoPath        As String
 Private m_MountedDrive          As String
+Private m_MountedDevicePath     As String
 Private m_VirtDiskHandle        As LongPtr
 Private m_AutoDismountOnTerminate As Boolean
 Private m_Thunks(0 To 12)       As ThunkEntry
@@ -519,36 +622,73 @@ Public Event IsoDismounted(ByVal isoPath As String)
 Public Function zz_fciFilePlaced(ByVal pccab As LongPtr, ByVal pszFile As LongPtr, _
                                  ByVal cbFile As Long, ByVal fContinuation As Long, _
                                  ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   LogMessage logDebug, "[SaveCab_FCI] Placed: " & fStringFromPtrA(pszFile)
   zz_fciFilePlaced = 0
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciFilePlaced"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  zz_fciFilePlaced = -1
 End Function
 
 ' --- index 1 ---
 Public Function zz_fciAlloc(ByVal cb As Long) As LongPtr
+  On Error GoTo Failed
   zz_fciAlloc = GlobalAlloc(GMEM_FIXED, cb)
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciAlloc"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  zz_fciAlloc = 0
 End Function
 
 ' --- index 2 --- Must stay Public, see banner above.
 Public Sub zz_fciFree(ByVal memory As LongPtr)
+  On Error GoTo Failed
   If memory <> 0 Then GlobalFree memory
+  Exit Sub
+
+Failed:
+  NoteCallbackError "zz_fciFree"
+  Resume Recover
+Recover:
+  On Error Resume Next
 End Sub
 
 ' --- index 3 ---
 Public Function zz_fciOpen(ByVal pszFile As LongPtr, ByVal oflag As Long, ByVal pmode As Long, _
                            ByRef perr As Long, ByVal pv As LongPtr) As LongPtr
+  On Error GoTo Failed
   Dim sPath As String, hFile As LongPtr
   sPath = fStringFromPtrA(pszFile)
-  hFile = apiCreateFileW(StrPtr(sPath), GENERIC_READ Or GENERIC_WRITE, FILE_SHARE_READ Or FILE_SHARE_WRITE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(sPath), GENERIC_READ Or GENERIC_WRITE, FILE_SHARE_READ Or FILE_SHARE_WRITE, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then
     perr = err.LastDllError
     zz_fciOpen = -1
   Else
     zz_fciOpen = hFile
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciOpen"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciOpen = -1
 End Function
 
 ' --- index 4 ---
 Public Function zz_fciRead(ByVal hf As LongPtr, ByVal memory As LongPtr, ByVal cb As Long, ByRef perr As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   If cb <= 0 Then
     zz_fciRead = 0
     Exit Function
@@ -557,15 +697,25 @@ Public Function zz_fciRead(ByVal hf As LongPtr, ByVal memory As LongPtr, ByVal c
   ReDim buf(0 To cb - 1)
   If apiReadFile(hf, buf(0), cb, bytesRead, 0) = 0 Then
     perr = err.LastDllError
-    zz_fciRead = 0
+    zz_fciRead = -1                  ' -1 is FCI's error value: 0 would mean end of file
   Else
     CopyMemoryByPtr memory, buf(0), bytesRead
     zz_fciRead = bytesRead
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciRead"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciRead = -1
 End Function
 
 ' --- index 5 ---
 Public Function zz_fciWrite(ByVal hf As LongPtr, ByVal memory As LongPtr, ByVal cb As Long, ByRef perr As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   If cb <= 0 Then
     zz_fciWrite = 0
     Exit Function
@@ -575,24 +725,44 @@ Public Function zz_fciWrite(ByVal hf As LongPtr, ByVal memory As LongPtr, ByVal 
   CopyMemoryByAddr buf(0), memory, cb
   If apiWriteFile(hf, buf(0), cb, bytesWritten, 0) = 0 Then
     perr = err.LastDllError
-    zz_fciWrite = 0
+    zz_fciWrite = -1
   Else
     zz_fciWrite = bytesWritten
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciWrite"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciWrite = -1
 End Function
 
 ' --- index 6 ---
 Public Function zz_fciClose(ByVal hf As LongPtr, ByRef perr As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   If apiCloseHandle(hf) = 0 Then
     perr = err.LastDllError
     zz_fciClose = -1
   Else
     zz_fciClose = 0
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciClose"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciClose = -1
 End Function
 
 ' --- index 7 ---
 Public Function zz_fciSeek(ByVal hf As LongPtr, ByVal dist As Long, ByVal seektype As Long, ByRef perr As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   Dim newPos As Long
   newPos = SetFilePointer(hf, dist, 0, seektype)
   If newPos = INVALID_SET_FILE_POINTER Then
@@ -601,20 +771,40 @@ Public Function zz_fciSeek(ByVal hf As LongPtr, ByVal dist As Long, ByVal seekty
   Else
     zz_fciSeek = newPos
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciSeek"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciSeek = -1
 End Function
 
 ' --- index 8 ---
 Public Function zz_fciDelete(ByVal pszFile As LongPtr, ByRef perr As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   If apiDeleteFileW(StrPtr(fStringFromPtrA(pszFile))) = 0 Then
     perr = err.LastDllError
     zz_fciDelete = -1
   Else
     zz_fciDelete = 0
   End If
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciDelete"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciDelete = -1
 End Function
 
 ' --- index 9 ---
 Public Function zz_fciGetTempFile(ByVal pszTempName As LongPtr, ByVal cbTempName As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   Dim sPath As String, sFile As String
 
   sPath = VBA.String$(MAX_PATH, vbNullChar)
@@ -649,15 +839,24 @@ Public Function zz_fciGetTempFile(ByVal pszTempName As LongPtr, ByVal cbTempName
 
   CopyAnsiStringToPtr pszTempName, sFile
   zz_fciGetTempFile = 1
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciGetTempFile"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  zz_fciGetTempFile = 0
 End Function
 
 ' --- index 10 ---
 Public Function zz_fciGetOpenInfo(ByVal pszName As LongPtr, ByRef pdate As Integer, _
                                   ByRef ptime As Integer, ByRef pattribs As Integer, _
                                   ByRef perr As Long, ByVal pv As LongPtr) As LongPtr
+  On Error GoTo Failed
   Dim sPath As String, hFile As LongPtr
   sPath = fStringFromPtrA(pszName)
-  hFile = apiCreateFileW(StrPtr(sPath), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(sPath), GENERIC_READ, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then
     perr = err.LastDllError
     zz_fciGetOpenInfo = -1
@@ -673,17 +872,44 @@ Public Function zz_fciGetOpenInfo(ByVal pszName As LongPtr, ByRef pdate As Integ
   attrs = apiGetFileAttributesW(StrPtr(sPath))
   pattribs = CInt(attrs And (FILE_ATTRIBUTE_READONLY Or FILE_ATTRIBUTE_HIDDEN Or FILE_ATTRIBUTE_SYSTEM Or FILE_ATTRIBUTE_ARCHIVE))
   zz_fciGetOpenInfo = hFile
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciGetOpenInfo"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  If perr = 0 Then perr = -1
+  zz_fciGetOpenInfo = -1
 End Function
 
 ' --- index 11 ---
 Public Function zz_fciGetNextCabinet(ByVal pccab As LongPtr, ByVal cbPrevCab As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   ' Single cabinet scope for now, deliberately refuses to span.
+  zz_fciGetNextCabinet = 0
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciGetNextCabinet"
+  Resume Recover
+Recover:
+  On Error Resume Next
   zz_fciGetNextCabinet = 0
 End Function
 
 ' --- index 12 ---
 Public Function zz_fciStatus(ByVal typeStatus As Long, ByVal cb1 As Long, ByVal cb2 As Long, ByVal pv As LongPtr) As Long
+  On Error GoTo Failed
   zz_fciStatus = 0
+  Exit Function
+
+Failed:
+  NoteCallbackError "zz_fciStatus"
+  Resume Recover
+Recover:
+  On Error Resume Next
+  zz_fciStatus = -1
 End Function
 
 Private Sub Class_Initialize()
@@ -713,6 +939,7 @@ Private Sub Class_Terminate()
       m_VirtDiskHandle = 0
       m_MountedIsoPath = ""
       m_MountedDrive = ""
+      m_MountedDevicePath = ""
     End If
   End If
   ReleaseThunks
@@ -743,14 +970,14 @@ Private Sub BuildThunk(ByVal memberIndex As Long, ByVal methodName As String, _
   addr = GetComProcAddress(Me, memberIndex)
   m_Thunks(memberIndex).ptr = AddressOfThunkForComProc(Me, addr, argCount, sz, WideReturn)
   m_Thunks(memberIndex).Size = sz
-  m_Thunks(memberIndex).Name = methodName
+  m_Thunks(memberIndex).name = methodName
 End Sub
 
 Private Sub ReleaseThunks()
   Dim i As Long
   For i = LBound(m_Thunks) To UBound(m_Thunks)
     If m_Thunks(i).ptr <> 0 Then VirtualFree m_Thunks(i).ptr, 0, MEM_RELEASE
-  Next i
+  Next
 End Sub
 
 Public Function NewFile(ByVal FilePath As String, _
@@ -878,7 +1105,7 @@ Public Function SaveFile() As Boolean
     Dim estimatedSize As LongLong
     For i = 0 To m_QueueCount - 1
       If Len(m_Queue(i).SourcePath) > 0 Then
-        estimatedSize = estimatedSize + GetFileSize64(m_Queue(i).SourcePath)
+        estimatedSize = estimatedSize + GetFileSize(m_Queue(i).SourcePath)
       ElseIf IsByteArrayUsable(m_Queue(i).data) Then
         estimatedSize = estimatedSize + UBound(m_Queue(i).data) + 1
       End If
@@ -891,37 +1118,37 @@ Public Function SaveFile() As Boolean
 
   m_OperationReport = ""
 
-  Dim tStart As Double, result As Boolean
-  tStart = Timer
+  Dim tStart As Double, Result As Boolean
+  tStart = timer
   If m_Type = atZip And m_Encryption >= aeAes128 Then
     ' AES path: pure VBA ZIP serialiser with archiveint DEFLATE.
     ' m_TotalCompressedSize is accumulated per-entry inside SaveZip_AES.
-    result = SaveZip_AES()
+    Result = SaveZip_AES()
   ElseIf m_Type = atCab Then
     ' FCI based path, libarchive has no CAB writer at all.
-    result = SaveCab_FCI()
-    If result Then
+    Result = SaveCab_FCI()
+    If Result Then
       Dim cabFileSize As LongLong
-      cabFileSize = GetFileSize64(m_SourceFile)
+      cabFileSize = GetFileSize(m_SourceFile)
       If cabFileSize >= 0 Then m_TotalCompressedSize = cabFileSize
     End If
   Else
     ' Standard path: libarchive end-to-end.
-    result = SaveLibArchive()
+    Result = SaveLibArchive()
     ' SaveLibArchive has no per-entry hook for compressed size, so we stat
     ' the output file on success - the same "honest on-disk footprint"
     ' approach used by EnsureScanned in read mode. m_SourceFile is still
     ' populated here. CloseFile (below) wipes it via ResetState.
-    If result Then
+    If Result Then
       Dim outFileSize As LongLong
-      outFileSize = GetFileSize64(m_SourceFile)
+      outFileSize = GetFileSize(m_SourceFile)
       If outFileSize >= 0 Then m_TotalCompressedSize = outFileSize
     End If
   End If
 
-  m_LastOperationTime = Timer - tStart
+  m_LastOperationTime = timer - tStart
   LogMessage logInfo, "[SaveFile] Completed in " & Format(m_LastOperationTime, "0.000") & "s"
-  SaveFile = result
+  SaveFile = Result
   CloseFile
 End Function
 
@@ -958,7 +1185,7 @@ Public Function MountISO(ByVal isoPath As String, Optional ByVal ReadOnly As Boo
   Dim attachFlags As Long
 
   tVst.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_ISO
-  tVst.VendorId = StringToGuid(VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT)
+  tVst.VendorId = StringToGUID(VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT)
   tOvdp.version = OPEN_VIRTUAL_DISK_VERSION_1
   tOvdp.RWDepth = OPEN_VIRTUAL_DISK_RW_DEPTH_DEFAULT
   tAvdp.version = ATTACH_VIRTUAL_DISK_VERSION_1
@@ -982,6 +1209,7 @@ Public Function MountISO(ByVal isoPath As String, Optional ByVal ReadOnly As Boo
   pathSize = MAX_PATH * 2
   pathBuffer = VBA.String$(MAX_PATH, vbNullChar)
   If GetVirtualDiskPhysicalPath(hDisk, pathSize, StrPtr(pathBuffer)) <> S_OK Then
+    DetachVirtualDisk hDisk, DETACH_VIRTUAL_DISK_FLAG_NONE, 0&
     apiCloseHandle hDisk
     SetError "[MountISO] Failed to retrieve virtual disk path."
     Exit Function
@@ -990,6 +1218,7 @@ Public Function MountISO(ByVal isoPath As String, Optional ByVal ReadOnly As Boo
   pathBuffer = CutNull(pathBuffer)
   m_VirtDiskHandle = hDisk
   m_MountedIsoPath = isoPath
+  m_MountedDevicePath = pathBuffer
   m_MountedDrive = GetDriveLetterFromDevicePath(pathBuffer)
   MountISO = m_MountedDrive
   RaiseEvent IsoMounted(isoPath, m_MountedDrive)
@@ -1000,8 +1229,10 @@ Public Function MountISOToLetter(ByVal isoPath As String, ByVal DriveLetter As S
   If Right$(DriveLetter, 1) <> "\" Then DriveLetter = DriveLetter & "\"
 
   Dim drive As String
-  drive = MountISO(isoPath, ReadOnly, False)
-  If drive = "" Then Exit Function
+  ' Resolve a volume GUID from an assigned mount point, then add the requested
+  ' mount point. A letterless mount has no path for GetVolumeNameFromDevicePath.
+  drive = MountISO(isoPath, ReadOnly, True)
+  If Len(drive) = 0 Then Exit Function
 
   Dim volumeName As String
   volumeName = GetVolumeNameFromDevicePath(drive)
@@ -1013,6 +1244,10 @@ Public Function MountISOToLetter(ByVal isoPath As String, ByVal DriveLetter As S
   If SetVolumeMountPointW(StrPtr(DriveLetter), StrPtr(volumeName)) <> 1 Then
     SetError "[MountISOToLetter] Failed to assign drive letter " & DriveLetter
     Exit Function
+  End If
+
+  If StrComp(drive, DriveLetter, vbTextCompare) <> 0 Then
+    DeleteVolumeMountPointW StrPtr(drive)
   End If
 
   m_MountedDrive = DriveLetter
@@ -1027,12 +1262,18 @@ Public Sub DismountISO(Optional ByVal Force As Boolean = False)
   Dim isoPathForEvent As String
   isoPathForEvent = m_MountedIsoPath
 
-  DetachVirtualDisk m_VirtDiskHandle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0&
+  Dim detachFlags As Long
+  If Force Then detachFlags = DETACH_VIRTUAL_DISK_FLAG_FORCE
+  If DetachVirtualDisk(m_VirtDiskHandle, detachFlags, 0&) <> S_OK Then
+    SetError "[DismountISO] Failed to detach virtual disk."
+    Exit Sub
+  End If
   apiCloseHandle m_VirtDiskHandle
 
   m_VirtDiskHandle = 0
   m_MountedIsoPath = ""
   m_MountedDrive = ""
+  m_MountedDevicePath = ""
   RaiseEvent IsoDismounted(isoPathForEvent)
   Exit Sub
 EH:
@@ -1097,9 +1338,9 @@ Public Sub Add(ByVal Source As Variant, Optional ByVal DestinationInArchive As S
       LogMessage logWarning, "[Add] source not found: " & path
       AppendReport "FAILED : " & path & " - not found"
     End If
-  Case vbArray + vbByte, vbByte Or vbArray
+  Case vbArray + vbByte
     If Len(DestinationInArchive) = 0 Then
-      LogMessage logWarning, "[Add} DestinationInArchive required for byte array sources."
+      LogMessage logWarning, "[Add] DestinationInArchive required for byte array sources."
       AppendReport "FAILED : (byte array) - no destination name supplied"
       Exit Sub
     End If
@@ -1157,22 +1398,22 @@ Public Sub Add(ByVal Source As Variant, Optional ByVal DestinationInArchive As S
   End Select
 End Sub
 
-Public Sub AddNew(ByVal Name As String, Optional ByVal parentPath As String = "")
+Public Sub AddNew(ByVal name As String, Optional ByVal parentPath As String = "")
   ' Creates an explicit folder entry in the archive.
   ' This is useful to establish folder structure before or after populating it,
   ' or to create intentionally empty folders.
   ' Name       : the folder name (e.g. "reports" or "2024/Q1")
   ' ParentPath : optional prefix (e.g. "output/") - trailing slash normalised
   If Not AssertMode(arcModeWrite, "AddNew") Then Exit Sub
-  If Len(Name) = 0 Then
+  If Len(name) = 0 Then
     LogMessage logWarning, "[AddNew] Empty name ignored."
     Exit Sub
   End If
   Dim fullPath As String
   If Len(parentPath) > 0 Then
-    fullPath = RemoveTrailingSlash(parentPath) & "/" & Name
+    fullPath = RemoveTrailingSlash(parentPath) & "/" & name
   Else
-    fullPath = Name
+    fullPath = name
   End If
   Add fullPath
 End Sub
@@ -1318,8 +1559,8 @@ Private Function InitWriteArchive() As Boolean
     archive_write_add_filter_none m_hWrite
   End Select
 
-  ' Build the ZIP/format module options as a single combined comma-separated
-  ' string. NOTE: libarchive's option parser can reject (or silently ignore)
+  ' Build the ZIP/format module options as a single combined comma-separated string.
+  ' NOTE: Apparently libarchive's option parser can reject
   ' a second archive_write_set_options call targeting the same module once
   ' the first has been applied, so all options for a given module are
   ' batched into one call here rather than issued as separate SetWriteOption
@@ -1338,7 +1579,7 @@ Private Function InitWriteArchive() As Boolean
       Case atTarZst: prefix = "zstd"
     End Select
     If Len(prefix) > 0 Then
-      combinedOpts = AppendOpt(combinedOpts, prefix & ":compression-level=" & m_CompressionLevel)
+      combinedOpts = AppendOption(combinedOpts, prefix & ":compression-level=" & m_CompressionLevel)
     End If
   End If
 
@@ -1350,29 +1591,19 @@ Private Function InitWriteArchive() As Boolean
   ' archive_write_header on this archiveint.dll build when an entry name
   ' contains non-ASCII characters (repro: CJK filename + ZipCrypto write).
   If m_Type = atZip Then
-    combinedOpts = AppendOpt(combinedOpts, "zip:hdrcharset=UTF-8")
+    combinedOpts = AppendOption(combinedOpts, "zip:hdrcharset=UTF-8")
   End If
 
   If m_Type = atZip And m_Encryption = aeZipCrypto And Len(m_Passphrase) > 0 Then
-    combinedOpts = AppendOpt(combinedOpts, "zip:encryption=traditional")
+    combinedOpts = AppendOption(combinedOpts, "zip:encryption=traditional")
   End If
-
-  ' EXPERIMENT (v1.1): explicitly enable the iso9660 name-extension records.
-  ' The bare iso9660 writer relies on defaults; a purely-non-ASCII path segment
-  ' (e.g. a folder named in CJK) was observed to be silently dropped from the
-  ' image along with its entire subtree, because base ISO 9660 has no valid
-  ' name for it. Rock Ridge stores full POSIX/UTF-8 names and is the extension
-  ' most likely to carry arbitrary non-ASCII names; Joliet is the Windows-native
-  ' extension the mount path reads. Enabling both explicitly (rather than
-  ' trusting defaults) is the thing under test here.
+  
   If m_Type = atIso Then
-    combinedOpts = AppendOpt(combinedOpts, "iso9660:rockridge")
-    combinedOpts = AppendOpt(combinedOpts, "iso9660:joliet")
+    combinedOpts = AppendOption(combinedOpts, "iso9660:rockridge")
+    combinedOpts = AppendOption(combinedOpts, "iso9660:joliet")
   End If
 
-  If Len(combinedOpts) > 0 Then SetWriteOption combinedOpts
-
-  ' Passphrase needs to precede the setting of the encryption option
+  ' Passphrase precedes the setting of the encryption option
   If Len(m_Passphrase) > 0 Then
     Dim pwd() As Byte
     pwd = ToUtf8Z(m_Passphrase)
@@ -1384,23 +1615,24 @@ Private Function InitWriteArchive() As Boolean
     End If
   End If
 
+  If Len(combinedOpts) > 0 Then SetWriteOption combinedOpts
+
   InitWriteArchive = True
 End Function
 
-Private Function AppendOpt(ByVal existing As String, ByVal newOpt As String) As String
-  ' Appends an "option=value" fragment to a comma-separated options string,
-  ' used to batch multiple options for the same libarchive module into a
-  ' single archive_write_set_options call.
+Private Function AppendOption(ByVal existing As String, ByVal newOpt As String) As String
+  ' Appends an "option=value" to a comma-separated options string, used to batch multiple
+  ' options for the same libarchive module into a single archive_write_set_options call.
   If Len(existing) = 0 Then
-    AppendOpt = newOpt
+    AppendOption = newOpt
   Else
-    AppendOpt = existing & "," & newOpt
+    AppendOption = existing & "," & newOpt
   End If
 End Function
 
-Private Function StringToGuid(ByVal Value As String) As GUID
+Private Function StringToGUID(ByVal value As String) As GUID
   Dim GUID As GUID
-  If CLSIDFromString(StrPtr(Value), GUID) = S_OK Then StringToGuid = GUID
+  If CLSIDFromString(StrPtr(value), GUID) = S_OK Then StringToGUID = GUID
 End Function
 
 Private Function CutNull(ByVal sStr As String) As String
@@ -1434,12 +1666,12 @@ Private Function GetVolumeNameFromDevicePath(ByVal devicePath As String) As Stri
 End Function
 
 Private Function TryGetExistingMount(ByVal isoPath As String) As String
-  Dim mounted() As String
-  mounted = GetAllMountedIsoPaths()
+  Dim Mounted() As String
+  Mounted = GetAllMountedIsoPaths()
   Dim i As Long
 
-  For i = LBound(mounted) To UBound(mounted)
-    If StrComp(mounted(i), isoPath, vbTextCompare) = 0 Then
+  For i = LBound(Mounted) To UBound(Mounted)
+    If StrComp(Mounted(i), isoPath, vbTextCompare) = 0 Then
       Dim tVst As VIRTUAL_STORAGE_TYPE
       Dim tOvdp As OPEN_VIRTUAL_DISK_PARAMETERS
       Dim hDisk As LongPtr
@@ -1447,7 +1679,7 @@ Private Function TryGetExistingMount(ByVal isoPath As String) As String
       Dim pathSize As Long
 
       tVst.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_ISO
-      tVst.VendorId = StringToGuid(VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT)
+      tVst.VendorId = StringToGUID(VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT)
       tOvdp.version = OPEN_VIRTUAL_DISK_VERSION_1
       tOvdp.RWDepth = OPEN_VIRTUAL_DISK_RW_DEPTH_DEFAULT
 
@@ -1461,12 +1693,12 @@ Private Function TryGetExistingMount(ByVal isoPath As String) As String
       End If
       Exit Function
     End If
-  Next i
+  Next
 End Function
 
 Private Function GetAllMountedIsoPaths() As String()
-  Dim result() As String
-  ReDim result(-1 To -1)
+  Dim Result() As String
+  ReDim Result(-1 To -1)
 
   Dim sizeBytes As Long, status As Long, Buffer As String, pBuffer As LongPtr, parts() As String, i As Long, count As Long
   sizeBytes = 0
@@ -1483,7 +1715,7 @@ Private Function GetAllMountedIsoPaths() As String()
   Loop
 
   If status <> ERROR_SUCCESS Or sizeBytes = 0 Then
-    GetAllMountedIsoPaths = result
+    GetAllMountedIsoPaths = Result
     Exit Function
   End If
 
@@ -1492,52 +1724,52 @@ Private Function GetAllMountedIsoPaths() As String()
     If Len(parts(i)) > 0 Then
       If UCase$(VBA.Right$(parts(i), 4)) = ".ISO" Then
         If count = 0 Then
-          ReDim result(0 To 0)
+          ReDim Result(0 To 0)
         Else
-          ReDim Preserve result(0 To count)
+          ReDim Preserve Result(0 To count)
         End If
-        result(count) = CutNull(parts(i))
+        Result(count) = CutNull(parts(i))
         count = count + 1
       End If
     End If
-  Next i
+  Next
 
-  If count = 0 Then ReDim result(-1 To -1)
-  GetAllMountedIsoPaths = result
+  If count = 0 Then ReDim Result(-1 To -1)
+  GetAllMountedIsoPaths = Result
 End Function
 
 Private Function WriteAllEntries() As Boolean
   ' Iterates the queue and writes each entry through the open libarchive handle.
   ' Errors are logged to OperationReport but do not abort the archive; processing
   ' continues so that as many entries as possible are written.
-  Dim i As Long, ok As Boolean
+  Dim i As Long, OK As Boolean
   Dim reportLines() As String, rCount As Long
   ReDim reportLines(0 To m_QueueCount - 1)
-  ok = True
+  OK = True
 
   RaiseEvent ProgressEvent("Writing " & m_QueueCount & " entries", 0)
 
   For i = 0 To m_QueueCount - 1
     If m_ProgressInterval > 0 And (i Mod m_ProgressInterval) = 0 Then
-      RaiseEvent ProgressEvent("Writing: " & m_Queue(i).Name, CLng((i + 1) / m_QueueCount * 100))
+      RaiseEvent ProgressEvent("Writing: " & m_Queue(i).name, CLng((i + 1) / m_QueueCount * 100))
     End If
 
     If Not WriteOneEntry(m_Queue(i)) Then
       Dim failLine As String
-      failLine = "FAILED : " & m_Queue(i).Name & " - " & m_LastError
+      failLine = "FAILED : " & m_Queue(i).name & " - " & m_LastError
       LogMessage logWarning, failLine
 
       reportLines(rCount) = failLine
       rCount = rCount + 1
-      ok = False
+      OK = False
     Else
       Dim passLine As String
-      passLine = "OK     : " & m_Queue(i).Name
+      passLine = "OK     : " & m_Queue(i).name
 
       ' Accumulate size for UncompressedSize / CompressedSize properties.
       ' For byte-array entries the uncompressed size is known immediately;
       ' for file entries we read it from disk (returns -1 on failure, ignored).
-      If m_Queue(i).isFolder = False Then
+      If m_Queue(i).IsFolder = False Then
         If Len(m_Queue(i).SourcePath) > 0 Then
           Dim fsz As LongLong
           fsz = m_Queue(i).fileSize
@@ -1553,7 +1785,7 @@ Private Function WriteAllEntries() As Boolean
   Next
   If rCount > 0 Then m_OperationReport = Join(reportLines, vbCrLf)
   RaiseEvent ProgressEvent("Completed", 100)
-  WriteAllEntries = ok
+  WriteAllEntries = OK
 End Function
 
 Private Function WriteOneEntry(ByRef e As QueueEntry) As Boolean
@@ -1562,15 +1794,15 @@ Private Function WriteOneEntry(ByRef e As QueueEntry) As Boolean
   ' Files are written either from disk (streamed in chunks) or from Data().
   On Error GoTo ErrHandler
 
-  Dim hEntry As LongPtr:
+  Dim hEntry As LongPtr
   hEntry = archive_entry_new()
   If hEntry = 0 Then
-    SetError "[WriteOneEntry] archive_entry_new failed: " & e.Name
+    SetError "[WriteOneEntry] archive_entry_new failed: " & e.name
     Exit Function
   End If
 
   Dim utf8Name() As Byte, t As Long
-  utf8Name = ToUtf8Z(e.Name)
+  utf8Name = ToUtf8Z(e.name)
   archive_entry_set_pathname_utf8 hEntry, VarPtr(utf8Name(0))
 
   t = DateToUnix(e.ModifiedDate)
@@ -1578,15 +1810,19 @@ Private Function WriteOneEntry(ByRef e As QueueEntry) As Boolean
   archive_entry_set_atime hEntry, t, 0
   archive_entry_set_ctime hEntry, t, 0
 
-  If e.isFolder Then
+  If e.IsFolder Then
     archive_entry_set_filetype hEntry, AE_IFDIR
     archive_entry_set_perm hEntry, DEFAULT_PERM_DIR
     archive_entry_set_size hEntry, 0
-    archive_write_header m_hWrite, hEntry
-    archive_entry_free hEntry
-    archive_write_finish_entry m_hWrite
-    WriteOneEntry = True
-    Exit Function
+    If archive_write_header(m_hWrite, hEntry) <> ARCHIVE_OK Then
+      SetError "[WriteOneEntry] archive_write_header failed: " & e.name
+      GoTo Cleanup
+    End If
+    If archive_write_finish_entry(m_hWrite) <> ARCHIVE_OK Then
+      SetError "[WriteOneEntry] archive_write_finish_entry failed: " & e.name
+      GoTo Cleanup
+    End If
+    GoTo EntryComplete
   End If
 
   archive_entry_set_filetype hEntry, AE_IFREG
@@ -1595,35 +1831,45 @@ Private Function WriteOneEntry(ByRef e As QueueEntry) As Boolean
   If e.IsStreamed Or (Len(e.SourcePath) > 0 And Not IsByteArrayUsable(e.data)) Then
     ' Stream from disk
     Dim sz As LongLong
-    sz = GetFileSize64(e.SourcePath)
+    sz = GetFileSize(e.SourcePath)
     If sz < 0 Then sz = 0
     archive_entry_set_size hEntry, sz
     If archive_write_header(m_hWrite, hEntry) <> ARCHIVE_OK Then
-      SetError "[WriteOneEntry] archive_write_header failed: " & e.Name
+      SetError "[WriteOneEntry] archive_write_header failed: " & e.name
       GoTo Cleanup
     End If
     If Not StreamFileToDisk(e.SourcePath) Then GoTo Cleanup
-    archive_write_finish_entry m_hWrite
+    If archive_write_finish_entry(m_hWrite) <> ARCHIVE_OK Then
+      SetError "[WriteOneEntry] archive_write_finish_entry failed: " & e.name
+      GoTo Cleanup
+    End If
   Else
     ' From in-memory Data()
     Dim dataLen As Long
     If IsByteArrayUsable(e.data) Then dataLen = UBound(e.data) - LBound(e.data) + 1
     archive_entry_set_size hEntry, dataLen
     If archive_write_header(m_hWrite, hEntry) <> ARCHIVE_OK Then
-      SetError "[WriteOneEntry] archive_write_header failed: " & e.Name
+      SetError "[WriteOneEntry] archive_write_header failed: " & e.name
       GoTo Cleanup
     End If
     If dataLen > 0 Then
-      Dim written As LongPtr
-      written = archive_write_data(m_hWrite, VarPtr(e.data(LBound(e.data))), dataLen)
-      If written < 0 Then
-        SetError "[WriteOneEntry] archive_write_data failed: " & e.Name
-        GoTo Cleanup
-      End If
+      Dim written As LongPtr, writeOffset As Long
+      Do While writeOffset < dataLen
+        written = archive_write_data(m_hWrite, VarPtr(e.data(LBound(e.data))) + writeOffset, dataLen - writeOffset)
+        If written <= 0 Then
+          SetError "[WriteOneEntry] archive_write_data failed: " & e.name
+          GoTo Cleanup
+        End If
+        writeOffset = writeOffset + CLng(written)
+      Loop
     End If
-    archive_write_finish_entry m_hWrite
+    If archive_write_finish_entry(m_hWrite) <> ARCHIVE_OK Then
+      SetError "[WriteOneEntry] archive_write_finish_entry failed: " & e.name
+      GoTo Cleanup
+    End If
   End If
 
+EntryComplete:
   archive_entry_free hEntry
   WriteOneEntry = True
   Exit Function
@@ -1633,20 +1879,20 @@ Cleanup:
   Exit Function
 
 ErrHandler:
-  SetError "[WriteOneEntry] WriteOneEntry crashed: " & e.Name & " - " & err.Description
+  SetError "[WriteOneEntry] WriteOneEntry crashed: " & e.name & " - " & err.Description
   Resume Cleanup
 End Function
 
 Private Function StreamFileToDisk(ByVal SourcePath As String) As Boolean
   ' Reads SourcePath in STREAM_CHUNK_SIZE chunks and feeds each block to the open libarchive write handle.
   ' Zero-byte file: nothing to stream; libarchive handles the empty entry
-  If GetFileSize64(SourcePath) = 0 Then
+  If GetFileSize(SourcePath) = 0 Then
     StreamFileToDisk = True
     Exit Function
   End If
 
   Dim hFile As LongPtr
-  hFile = apiCreateFileW(StrPtr(SourcePath), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(SourcePath), GENERIC_READ, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then
     SetError "[StreamFileToDisk] Cannot open " & SourcePath
     Exit Function
@@ -1656,16 +1902,26 @@ Private Function StreamFileToDisk(ByVal SourcePath As String) As Boolean
   Dim bytesRead As Long, w As LongPtr
 
   Do
-    If apiReadFile(hFile, buf(0), STREAM_CHUNK_SIZE, bytesRead, 0) = 0 Then Exit Do
-    If bytesRead = 0 Then Exit Do
-    w = archive_write_data(m_hWrite, VarPtr(buf(0)), bytesRead)
-    If w < 0 Then
-      SetError "[StreamFileToDisk] Write failed: " & SourcePath
+    If apiReadFile(hFile, buf(0), STREAM_CHUNK_SIZE, bytesRead, 0) = 0 Then
+      SetError "[StreamFileToDisk] Read failed: " & SourcePath
       apiCloseHandle hFile
       Exit Function
     End If
-  Loop
+    If bytesRead = 0 Then Exit Do
 
+    Dim chunkOffset As Long
+    chunkOffset = 0
+    Do While chunkOffset < bytesRead
+      w = archive_write_data(m_hWrite, VarPtr(buf(0)) + chunkOffset, bytesRead - chunkOffset)
+      If w <= 0 Then
+        SetError "[StreamFileToDisk] Write failed: " & SourcePath
+        apiCloseHandle hFile
+        Exit Function
+      End If
+      chunkOffset = chunkOffset + CLng(w)
+    Loop
+  Loop
+  
   apiCloseHandle hFile
   StreamFileToDisk = True
 End Function
@@ -1815,12 +2071,12 @@ Private Sub AddFileEntry(ByVal DiskPath As String, ByVal DestName As String)
 
   ' Decide streaming vs buffering based on file size
   Dim fsize As LongLong, streamed As Boolean
-  fsize = GetFileSize64(DiskPath)
+  fsize = GetFileSize(DiskPath)
   streamed = (fsize > STREAM_CHUNK_SIZE * 8)  ' > 512 KB
   Dim e As QueueEntry
-  e.Name = entryName
+  e.name = entryName
   e.SourcePath = DiskPath
-  e.isFolder = False
+  e.IsFolder = False
   e.IsStreamed = streamed
   e.ModifiedDate = FileModifiedDate(DiskPath)
   e.fileSize = fsize
@@ -1830,17 +2086,17 @@ Private Sub AddFileEntry(ByVal DiskPath As String, ByVal DestName As String)
   LogMessage logDebug, "Queued: " & entryName & " (" & DiskPath & ")"
 End Sub
 
-Private Sub AddFolderRecursive(ByVal FolderPath As String, ByVal DestPrefix As String)
+Private Sub AddFolderRecursive(ByVal folderPath As String, ByVal DestPrefix As String)
   ' Recursively enqueues all files under FolderPath.
   ' The folder entry itself is also queued so the structure is preserved.
   ' DestPrefix controls where in the archive the contents land.
 
   Dim cleanFolder As String, archivePrefix As String
-  cleanFolder = RemoveTrailingSlash(FolderPath)
+  cleanFolder = RemoveTrailingSlash(folderPath)
   If Len(DestPrefix) > 0 Then
     archivePrefix = NormaliseEntryName(RemoveTrailingSlash(DestPrefix)) & "/"
   Else
-  ' Default: use the folder's own name as the top-level prefix
+    ' Default: use the folder's own name as the top-level prefix
     archivePrefix = FileNameFromPath(cleanFolder) & "/"
   End If
 
@@ -1854,7 +2110,7 @@ Private Sub AddFolderRecursive(ByVal FolderPath As String, ByVal DestPrefix As S
 
   hFind = apiFindFirstFileW(StrPtr(searchPath), fd)
   If hFind = INVALID_HANDLE_VALUE Then
-    LogMessage logWarning, "AddFolderRecursive: cannot enumerate " & FolderPath
+    LogMessage logWarning, "AddFolderRecursive: cannot enumerate " & folderPath
     Exit Sub
   End If
 
@@ -1881,8 +2137,8 @@ End Sub
 Private Sub QueueBytes(ByVal entryName As String, ByRef data() As Byte)
   ' Enqueues a raw byte array under the given entry name.
   Dim e As QueueEntry
-  e.Name = entryName
-  e.isFolder = False
+  e.name = entryName
+  e.IsFolder = False
   e.IsStreamed = False
   e.ModifiedDate = Now
   If IsByteArrayUsable(data) Then
@@ -1903,8 +2159,8 @@ Private Sub QueueFolder(ByVal entryName As String)
     If m_FolderIndex.Exists(entryName) Then Exit Sub
   End If
   Dim e As QueueEntry
-  e.Name = entryName
-  e.isFolder = True
+  e.name = entryName
+  e.IsFolder = True
   e.ModifiedDate = Now
   AppendQueue e
   If Not m_FolderIndex Is Nothing Then m_FolderIndex.Add entryName, True
@@ -1916,24 +2172,24 @@ Private Sub AppendQueue(ByRef e As QueueEntry)
   ' file entry with the same Name already exists in the queue.
   ' Folder entries bypass conflict checking   QueueFolder already deduplicates,
   ' and duplicate folder markers in a ZIP are harmless.
-  If Not e.isFolder Then
+  If Not e.IsFolder Then
     Dim conflictIdx As Long
-    conflictIdx = FindQueueEntry(e.Name)
+    conflictIdx = FindQueueEntry(e.name)
     If conflictIdx >= 0 Then
       Select Case m_ConflictMode
       Case acmReject
         Dim rejectMsg As String
-        rejectMsg = "CONFLICT: " & e.Name & " already queued - skipped (acmReject)"
+        rejectMsg = "CONFLICT: " & e.name & " already queued - skipped (acmReject)"
         LogMessage logWarning, rejectMsg
         AppendReport rejectMsg
         Exit Sub
       Case acmOverwrite
-        LogMessage logDebug, "CONFLICT: " & e.Name & " replaced (acmOverwrite)"
+        LogMessage logDebug, "CONFLICT: " & e.name & " replaced (acmOverwrite)"
         m_Queue(conflictIdx) = e
         Exit Sub          ' already in the array; count unchanged
       Case acmRename
-        e.Name = UniqueEntryName(e.Name)
-        LogMessage logDebug, "CONFLICT: renamed to " & e.Name & " (acmRename)"
+        e.name = UniqueEntryName(e.name)
+        LogMessage logDebug, "CONFLICT: renamed to " & e.name & " (acmRename)"
         ' fall through to append with the new name
       End Select
     End If
@@ -1955,8 +2211,8 @@ Private Function FindQueueEntry(ByVal entryName As String) As Long
   FindQueueEntry = -1
   Dim i As Long
   For i = 0 To m_QueueCount - 1
-    If Not m_Queue(i).isFolder Then
-      If StrComp(m_Queue(i).Name, entryName, vbTextCompare) = 0 Then
+    If Not m_Queue(i).IsFolder Then
+      If StrComp(m_Queue(i).name, entryName, vbTextCompare) = 0 Then
         FindQueueEntry = i
         Exit Function
       End If
@@ -1964,22 +2220,22 @@ Private Function FindQueueEntry(ByVal entryName As String) As Long
   Next
 End Function
 
-Private Function UniqueEntryName(ByVal BaseName As String) As String
+Private Function UniqueEntryName(ByVal baseName As String) As String
   ' Returns a name not already present in the queue by appending (2), (3) etc.
   ' before the extension. Strips any existing "(n)" suffix first so repeated
   ' renames do not produce "alpha (2) (2).txt".
   ' e.g. "docs/alpha.txt" -> "docs/alpha (2).txt" -> "docs/alpha (3).txt"
 
   ' Split at the last dot that falls within the filename component
-  Dim slashPos As Long: slashPos = InStrRev(BaseName, "/")
-  Dim dotPos   As Long: dotPos = InStrRev(BaseName, ".")
+  Dim slashPos As Long: slashPos = InStrRev(baseName, "/")
+  Dim dotPos   As Long: dotPos = InStrRev(baseName, ".")
   Dim stem     As String
   Dim ext      As String
   If dotPos > slashPos Then
-    stem = VBA.Left$(BaseName, dotPos - 1)
-    ext = VBA.mId$(BaseName, dotPos)        ' includes the leading dot
+    stem = VBA.Left$(baseName, dotPos - 1)
+    ext = VBA.mId$(baseName, dotPos)        ' includes the leading dot
   Else
-    stem = BaseName
+    stem = baseName
     ext = ""
   End If
   ' Strip any existing " (n)" suffix so repeated calls do not double-suffix
@@ -2037,12 +2293,13 @@ Private Function FileNameFromPath(ByVal fullPath As String) As String
   FileNameFromPath = fullPath
 End Function
 
-Private Function IsCompressedFileType(ByVal Name As String) As Boolean
-  ' Returns True for file types that are already compressed and benefit little from a second compression pass
+Private Function IsCompressedFileType(ByVal name As String) As Boolean
+  ' Returns True for file types that are already compressed and benefit
+  ' little from a second compression pass
   Dim dotPos As Long
-  dotPos = InStrRev(Name, ".")
+  dotPos = InStrRev(name, ".")
   If dotPos = 0 Then Exit Function
-  Select Case VBA.LCase$(VBA.mId$(Name, dotPos))
+  Select Case VBA.LCase$(VBA.mId$(name, dotPos))
   Case ".zip", ".7z", ".gz", ".rar", ".cab", ".iso", ".xz", ".bz", ".bz2", _
        ".tar", ".tgz", ".jpg", ".mp4", ".mp3", ".png", ".mov", ".aac", ".docx", _
        ".xlsx", ".pptx", ".epub", ".docm", ".xlsm", ".pptm", ".dotm", ".xlam", ".xltm"
@@ -2106,22 +2363,26 @@ Public Function Extract(ByVal target As String, _
   End If
 End Function
 
-Public Function ExtractAll(ByVal outputFolder As String, Optional ByVal PassPhrase As String = "") As Boolean
+Public Function ExtractAll(ByVal OutputFolder As String, Optional ByVal PassPhrase As String = "") As Boolean
   
   ClearError
   If Not AssertMode(arcModeRead, "ExtractAll") Then Exit Function
   Dim effectivePass As String
   effectivePass = IIf(Len(PassPhrase) > 0, PassPhrase, m_Passphrase)
   If Not ReopenForRead(effectivePass) Then Exit Function
+  If Len(OutputFolder) = 0 Then
+    SetError "[ExtractAll] An output folder is required."
+    Exit Function
+  End If
   Dim outRoot As String
-  outRoot = RemoveTrailingSlash(outputFolder)
-  If Not EnsureDirExists(outRoot) Then
-    SetError "[ExtractAll] Cannot create output folder: " & outputFolder
+  outRoot = RemoveTrailingSlash(OutputFolder)
+  If Not CreateFolderRecursive(outRoot) Then
+    SetError "[ExtractAll] Cannot create output folder: " & OutputFolder
     Exit Function
   End If
 
-  Dim ok         As Boolean: ok = True
-  Dim tStart     As Double:  tStart = Timer
+  Dim OK         As Boolean: OK = True
+  Dim tStart     As Double:  tStart = timer
   Dim entryIndex As Long
   Dim posUncomp  As LongLong
   Dim pctDone    As Long
@@ -2140,14 +2401,24 @@ Public Function ExtractAll(ByVal outputFolder As String, Optional ByVal PassPhra
     End If
 
     Dim entryName As String
-    entryName = NormaliseEntryName(PtrToStringW(archive_entry_pathname_w(m_hEntry)))
+    entryName = PtrToStringW(archive_entry_pathname_w(m_hEntry))
+    If Not IsSafeArchiveEntryName(entryName) Then
+      AppendReport "FAILED : " & entryName & " - unsafe archive path"
+      LogMessage logWarning, "ExtractAll: rejected unsafe archive path: " & entryName
+      OK = False
+      GoTo NextExtractEntry
+    End If
+    entryName = NormaliseEntryName(entryName)
     RaiseEvent ProgressEvent("Extracting: " & entryName, pctDone)
     Dim isDir As Boolean
     isDir = ((archive_entry_filetype(m_hEntry) And AE_IFDIR) <> 0) Or (VBA.Right$(entryName, 1) = "/")
     If isDir Then
       Dim dirPath As String
       dirPath = outRoot & "\" & VBA.Replace(entryName, "/", "\")
-      EnsureDirExists dirPath
+      If Not CreateFolderRecursive(dirPath) Then
+        AppendReport "FAILED : " & entryName & " - could not create folder"
+        OK = False
+      End If
     Else
       Dim destPath As String
       destPath = outRoot & "\" & VBA.Replace(entryName, "/", "\")
@@ -2155,38 +2426,53 @@ Public Function ExtractAll(ByVal outputFolder As String, Optional ByVal PassPhra
       If Not EnsureParentDirOfFile(destPath) Then
         LogMessage logWarning, "ExtractAll: could not create folder for " & destPath
         AppendReport "FAILED : " & entryName & " - could not create parent folder"
-        ok = False
+        OK = False
       ElseIf Not ExtractCurrentEntryToFile(destPath) Then
         AppendReport "FAILED : " & entryName & " - " & m_LastError
-        ok = False
+        OK = False
       Else
         AppendReport "OK     : " & entryName
         LogMessage logDebug, "Extracted: " & entryName
       End If
     End If
-
+NextExtractEntry:
   Loop
 
-  m_LastOperationTime = Timer - tStart
+  m_LastOperationTime = timer - tStart
   RaiseEvent ProgressEvent("Done", 100)
   LogMessage logInfo, "ExtractAll completed in " & Format(m_LastOperationTime, "0.000") & "s"
-  ExtractAll = ok
+  ExtractAll = OK
 End Function
+
 Private Function ExtractEntryToBytes() As Variant
   ' Reads the current entry from the open libarchive handle into a Byte array.
   ' Returns the array as a Variant, or Empty on failure.
 
   Dim entrySize As LongLong
   entrySize = archive_entry_size(m_hEntry)
+  If entrySize > 2147483647# Then
+    SetError "[ExtractEntryToBytes] Entry exceeds the 2 GB VBA array limit."
+    Exit Function
+  End If
 
-  Dim buf() As Byte, totalRead As LongLong
+  Dim buf() As Byte, totalRead As LongLong, readStatus As Long
 
   If entrySize > 0 Then
     ReDim buf(0 To CLng(entrySize) - 1)
     Dim p As LongPtr, sz As LongPtr, off As LongLong
 
-    Do While archive_read_data_block(m_hRead, p, sz, off) = ARCHIVE_OK
+    Do
+      readStatus = archive_read_data_block(m_hRead, p, sz, off)
+      If readStatus = ARCHIVE_EOF Then Exit Do
+      If readStatus <> ARCHIVE_OK Then
+        SetError "[ExtractEntryToBytes] Failed reading archive entry data."
+        Exit Function
+      End If
       Dim needed As LongLong: needed = off + CLng(sz)
+      If needed > 2147483647# Then
+        SetError "[ExtractEntryToBytes] Entry exceeds the 2 GB VBA array limit."
+        Exit Function
+      End If
       If needed > UBound(buf) + 1 Then
         ReDim Preserve buf(0 To CLng(needed) - 1)
       End If
@@ -2198,10 +2484,23 @@ Private Function ExtractEntryToBytes() As Variant
     ReDim buf(0 To 65535)
     Dim p2 As LongPtr, sz2 As LongPtr, off2 As LongLong
 
-    Do While archive_read_data_block(m_hRead, p2, sz2, off2) = ARCHIVE_OK
+    Do
+      readStatus = archive_read_data_block(m_hRead, p2, sz2, off2)
+      If readStatus = ARCHIVE_EOF Then Exit Do
+      If readStatus <> ARCHIVE_OK Then
+        SetError "[ExtractEntryToBytes] Failed reading archive entry data."
+        Exit Function
+      End If
       Dim needed2 As LongLong: needed2 = off2 + CLng(sz2)
+      If needed2 > 2147483647# Then
+        SetError "[ExtractEntryToBytes] Entry exceeds the 2 GB VBA array limit."
+        Exit Function
+      End If
       If needed2 > UBound(buf) + 1 Then
-        ReDim Preserve buf(0 To CLng(needed2 * 2) - 1)
+        Dim newCapacity As LongLong
+        newCapacity = needed2 * 2
+        If newCapacity > 2147483647# Then newCapacity = 2147483647#
+        ReDim Preserve buf(0 To CLng(newCapacity) - 1)
       End If
       apiCopyMemory VarPtr(buf(0)) + off2, p2, CLng(sz2)
       totalRead = needed2
@@ -2235,28 +2534,56 @@ End Function
 Private Function ExtractCurrentEntryToFile(ByVal FilePath As String) As Boolean
   ' Reads data blocks from the current libarchive entry and writes them to the specified file path.
   Dim hFile As LongPtr
-  hFile = apiCreateFileW(StrPtr(FilePath), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(FilePath), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then
     SetError "[ExtractCurrentEntryToFile] Cannot create " & FilePath
     Exit Function
   End If
 
   Dim p As LongPtr, sz As LongPtr, off As LongLong, chunk() As Byte, written As Long
+  Dim newPosition As LongLong, blockOffset As LongLong, writeOffset As Long
+  Dim readStatus As Long
 
-  Do While archive_read_data_block(m_hRead, p, sz, off) = ARCHIVE_OK
+  Do
+    readStatus = archive_read_data_block(m_hRead, p, sz, off)
+    If readStatus = ARCHIVE_EOF Then Exit Do
+    If readStatus <> ARCHIVE_OK Then
+      SetError "[ExtractCurrentEntryToFile] Failed reading archive entry data for " & FilePath
+      apiCloseHandle hFile
+      Exit Function
+    End If
     Dim blockLen As Long: blockLen = CLng(sz)
     If blockLen = 0 Then GoTo NextBlock
+
+    If apiSetFilePointerEx(hFile, off, newPosition, 0) = 0 Then
+      SetError "[ExtractCurrentEntryToFile] Seek failed for " & FilePath
+      apiCloseHandle hFile
+      Exit Function
+    End If
 
     ReDim chunk(0 To blockLen - 1)
     apiCopyMemory VarPtr(chunk(0)), p, blockLen
 
-    If apiWriteFile(hFile, chunk(0), blockLen, written, 0) = 0 Or written <> blockLen Then
-      SetError "[ExtractCurrentEntryToFile] Write failed for " & FilePath
+    writeOffset = 0
+    Do While writeOffset < blockLen
+      If apiWriteFile(hFile, chunk(writeOffset), blockLen - writeOffset, written, 0) = 0 Or written = 0 Then
+        SetError "[ExtractCurrentEntryToFile] Write failed for " & FilePath
+        apiCloseHandle hFile
+        Exit Function
+      End If
+      writeOffset = writeOffset + written
+    Loop
+    blockOffset = off + blockLen
+NextBlock:
+  Loop
+
+  If archive_entry_size(m_hEntry) > blockOffset Then
+    If apiSetFilePointerEx(hFile, archive_entry_size(m_hEntry), newPosition, 0) = 0 Or apiSetEndOfFile(hFile) = 0 Then
+      SetError "[ExtractCurrentEntryToFile] Could not set final file size for " & FilePath
       apiCloseHandle hFile
       Exit Function
     End If
-NextBlock:
-  Loop
+  End If
 
   apiCloseHandle hFile
   ExtractCurrentEntryToFile = True
@@ -2266,7 +2593,6 @@ Private Function ReopenForRead(ByVal PassPhrase As String) As Boolean
   ' Closes and re-opens the archive from m_SourceFile so iteration can restart
   ' from the beginning. Required because libarchive is forward-only.
 
-  ' Close existing handle
   If m_hRead <> 0 Then
     archive_read_close m_hRead
     archive_read_free m_hRead
@@ -2298,10 +2624,10 @@ Private Function ReopenForRead(ByVal PassPhrase As String) As Boolean
   ReopenForRead = True
 End Function
 
-Private Function EnsureDirExists(ByVal dirPath As String) As Boolean
+Private Function CreateFolderRecursive(ByVal dirPath As String) As Boolean
   dirPath = RemoveTrailingSlash(dirPath)
-  If Len(dirPath) = 0 Then EnsureDirExists = True: Exit Function
-  If FolderExists(dirPath) Then EnsureDirExists = True: Exit Function
+  If Len(dirPath) = 0 Then CreateFolderRecursive = True: Exit Function
+  If FolderExists(dirPath) Then CreateFolderRecursive = True: Exit Function
 
   ' Recurse upward first, but stop before drive root ("C:\")
   Dim slashPos As Long
@@ -2310,11 +2636,30 @@ Private Function EnsureDirExists(ByVal dirPath As String) As Boolean
     Dim parent As String
     parent = VBA.Left$(dirPath, slashPos - 1)
     If Not FolderExists(parent) Then
-      If Not EnsureDirExists(parent) Then Exit Function
+      If Not CreateFolderRecursive(parent) Then Exit Function
     End If
   End If
 
-  EnsureDirExists = (apiCreateDirectoryW(StrPtr(dirPath), 0) <> 0) Or FolderExists(dirPath)
+  CreateFolderRecursive = (apiCreateDirectoryW(StrPtr(dirPath), 0) <> 0) Or FolderExists(dirPath)
+End Function
+
+Private Function IsSafeArchiveEntryName(ByVal entryName As String) As Boolean
+  Dim normalized As String, segments() As String, segment As String, i As Long
+  normalized = VBA.Replace(entryName, "\", "/")
+  If Len(normalized) = 0 Or InStr(1, normalized, vbNullChar, vbBinaryCompare) > 0 Then Exit Function
+  If VBA.Left$(normalized, 1) = "/" Then Exit Function
+  If Len(normalized) >= 2 And VBA.mId$(normalized, 2, 1) = ":" Then Exit Function
+
+  segments = Split(normalized, "/")
+  For i = LBound(segments) To UBound(segments)
+    segment = segments(i)
+    If segment = "." Or segment = ".." Then Exit Function
+    If InStr(1, segment, ":", vbBinaryCompare) > 0 Then Exit Function
+    If Len(segment) > 0 Then
+      If VBA.Right$(segment, 1) = "." Or VBA.Right$(segment, 1) = " " Then Exit Function
+    End If
+  Next
+  IsSafeArchiveEntryName = True
 End Function
 
 Private Function EnsureParentDirOfFile(ByVal FilePath As String) As Boolean
@@ -2322,7 +2667,7 @@ Private Function EnsureParentDirOfFile(ByVal FilePath As String) As Boolean
   slashPos = InStrRev(FilePath, "\")
   If slashPos = 0 Then slashPos = InStrRev(FilePath, "/")
   If slashPos <= 0 Then EnsureParentDirOfFile = True: Exit Function
-  EnsureParentDirOfFile = EnsureDirExists(VBA.Left$(FilePath, slashPos - 1))
+  EnsureParentDirOfFile = CreateFolderRecursive(VBA.Left$(FilePath, slashPos - 1))
 End Function
 
 Public Function Dir(Optional ByVal pattern As String = "*") As Variant
@@ -2355,7 +2700,7 @@ Public Function Dir(Optional ByVal pattern As String = "*") As Variant
 
   Dim i As Long
   For i = 0 To m_ScanCount - 1
-    If MatchesPattern(m_ScanEntries(i).Name, pattern) Then
+    If MatchesPattern(m_ScanEntries(i).name, pattern) Then
       If matchCount = 0 Then
         ReDim matches(0 To 0)
       ElseIf matchCount > UBound(matches) Then
@@ -2399,13 +2744,13 @@ Private Sub EnsureScanned()
 
   Do While archive_read_next_header(m_hRead, m_hEntry) = ARCHIVE_OK
     Dim se As ScannedEntry
-    se.Name = NormaliseEntryName(PtrToStringW(archive_entry_pathname_w(m_hEntry)))
-    se.isFolder = ((archive_entry_filetype(m_hEntry) And AE_IFDIR) <> 0) Or (VBA.Right$(se.Name, 1) = "/")
+    se.name = NormaliseEntryName(PtrToStringW(archive_entry_pathname_w(m_hEntry)))
+    se.IsFolder = ((archive_entry_filetype(m_hEntry) And AE_IFDIR) <> 0) Or (VBA.Right$(se.name, 1) = "/")
     se.UncompressedSize = archive_entry_size(m_hEntry)
     se.ModifiedUnix = archive_entry_mtime(m_hEntry)
 
     ' Detect encryption from the first non-folder entry
-    If Not m_IsEncrypted And Not se.isFolder Then
+    If Not m_IsEncrypted And Not se.IsFolder Then
       m_IsEncrypted = (archive_entry_is_encrypted(m_hEntry) <> 0)
     End If
 
@@ -2436,13 +2781,13 @@ Private Sub EnsureScanned()
     m_ScanEntries(m_ScanCount) = se
     m_ScanCount = m_ScanCount + 1
 
-    If se.isFolder Then
+    If se.IsFolder Then
       m_FolderCount = m_FolderCount + 1
     Else
       m_FileCount = m_FileCount + 1
     End If
 
-    If Not se.isFolder Then
+    If Not se.IsFolder Then
       m_TotalUncompressedSize = m_TotalUncompressedSize + se.UncompressedSize
     End If
   Loop
@@ -2456,7 +2801,7 @@ Private Sub EnsureScanned()
   ' granular but includes local-header overhead; the on-disk size is the
   ' honest "how big is this archive" answer and is always available.
   Dim fsz As LongLong
-  fsz = GetFileSize64(m_SourceFile)
+  fsz = GetFileSize(m_SourceFile)
   If fsz >= 0 Then m_TotalCompressedSize = fsz
 
   m_Scanned = True
@@ -2479,7 +2824,7 @@ Private Function DirFromQueue(ByVal pattern As String) As Variant
 
   Dim i As Long
   For i = 0 To m_QueueCount - 1
-    If MatchesPattern(m_Queue(i).Name, pattern) Then
+    If MatchesPattern(m_Queue(i).name, pattern) Then
       If matchCount = 0 Then
         ReDim matches(0 To 0)
       ElseIf matchCount > UBound(matches) Then
@@ -2488,9 +2833,9 @@ Private Function DirFromQueue(ByVal pattern As String) As Variant
 
       Dim d As Object
       Set d = CreateObject("Scripting.Dictionary")
-      d("Name") = m_Queue(i).Name
+      d("Name") = m_Queue(i).name
       d("Size") = CLngLng(0)          ' size not yet known for queued items
-      d("IsFolder") = m_Queue(i).isFolder
+      d("IsFolder") = m_Queue(i).IsFolder
       d("Modified") = m_Queue(i).ModifiedDate
 
       Set matches(matchCount) = d
@@ -2576,9 +2921,9 @@ Private Function EntryToDict(ByRef se As ScannedEntry) As Object
   Dim d As Object
   Set d = CreateObject("Scripting.Dictionary")
 
-  d("Name") = se.Name
+  d("Name") = se.name
   d("Size") = se.UncompressedSize
-  d("IsFolder") = se.isFolder
+  d("IsFolder") = se.IsFolder
   d("Modified") = UnixToDate(se.ModifiedUnix)
 
   Set EntryToDict = d
@@ -2604,10 +2949,10 @@ Public Property Get Mode() As ArchiveMode
   Mode = m_Mode
 End Property
 
-Public Property Get FileCount() As Long
+Public Property Get fileCount() As Long
   ' Number of non-folder entries in the opened archive (read only obviously).
   If m_Mode = arcModeRead Then EnsureScanned
-  FileCount = m_FileCount
+  fileCount = m_FileCount
 End Property
 
 Public Property Get FolderCount() As Long
@@ -2751,7 +3096,7 @@ End Property
 
 Public Property Let ProgressInterval(ByVal val As Long)
   ' Number of entries between Progress raises during write/extract.
-  ' 1 = raise on every entry (default); 0 = suppress ProgressEvent events.
+  ' 1 = raise on every entry (default); 0 = ignore ProgressEvent events.
   m_ProgressInterval = val
 End Property
 
@@ -2759,7 +3104,579 @@ Public Property Get ProgressInterval() As Long
   ProgressInterval = m_ProgressInterval
 End Property
 
-Private Function pvCryptoAesInit(ByRef State As ArchiveCryptoState, ByRef baPass() As Byte, ByRef baSalt() As Byte, ByVal lKeyLen As Long, ByRef nPassVer As Integer) As Boolean
+Public Function CompressBytes(ByRef inputData() As Byte, _
+                              ByVal Algorithm As CompressionAlgorithm, _
+                              Optional ByVal engine As NtCompressionEngine = COMPRESSION_ENGINE_STANDARD) As Byte()
+  
+  ' Compress a byte array using a CompressionAlgorithm enum value.
+  ' Returns compressed bytes, or an empty array on failure (check LastError).
+  ' Routing: caMSZIP-caLZMS use cabinet.dll; caRTL_* use ntdll.dll;
+  ' caDeflate-caZlib use archiveint.dll.
+  ' Engine applies only to the ntdll (RTL) algorithms.
+  
+  On Error GoTo ErrHandler
+
+  If Not IsByteArrayUsable(inputData) Then
+    SetError "[CompressBytes] Input data array is empty or unallocated"
+    Exit Function
+  End If
+
+  Select Case Algorithm
+    Case caDeflate, caGzip, caZlib
+      CompressBytes = CompressArchiveInt(inputData, Algorithm)
+    Case caMSZIP, caXPRESS, caXPRESS_HUFF, caLZMS
+      CompressBytes = CompressCabinet(inputData, CLng(Algorithm))
+    Case caRTL_LZNT1, caRTL_XPRESS, caRTL_XPRESS_HUFFMAN
+      CompressBytes = CompressRtl(inputData, CLng(Algorithm), engine)
+    Case Else
+      SetError "[CompressBytes] Unknown algorithm: " & Algorithm
+  End Select
+
+  Exit Function
+ErrHandler:
+  SetError "[CompressBytes] Error " & err.Number & ": " & err.Description
+End Function
+
+Public Function DecompressBytes(ByRef inputData() As Byte, _
+                               Optional ByVal Algorithm As CompressionAlgorithm = -1, _
+                               Optional ByVal OriginalSize As Long = 0) As Byte()
+  
+  ' Decompress a byte array. If Algorithm is left at -1 it is auto-detected
+  ' from the cabinet.dll or vbaSquash magic header. Returns an empty array
+  ' on failure (check LastError). OriginalSize is a fallback for RTL data
+  ' that carries no vbaSquash header.
+  
+  
+  On Error GoTo ErrHandler
+
+  If Not IsByteArrayUsable(inputData) Then
+    SetError "[DecompressBytes] Input data array is empty or unallocated"
+    Exit Function
+  End If
+
+  If Algorithm = -1 Then
+    Algorithm = DetectCompressionAlgorithm(inputData)
+    If Algorithm = -1 Then
+      SetError "[DecompressBytes] Unable to detect compression algorithm from header"
+      Exit Function
+    End If
+  End If
+
+  Select Case Algorithm
+    Case caDeflate, caGzip, caZlib
+      DecompressBytes = DecompressArchiveInt(inputData, Algorithm)
+    Case caMSZIP, caXPRESS, caXPRESS_HUFF, caLZMS
+      DecompressBytes = DecompressCabinet(inputData, CLng(Algorithm))
+    Case caRTL_LZNT1, caRTL_XPRESS, caRTL_XPRESS_HUFFMAN
+      DecompressBytes = DecompressRtl(inputData, CLng(Algorithm), OriginalSize)
+    Case Else
+      SetError "[DecompressBytes] Unknown algorithm: " & Algorithm
+  End Select
+
+  Exit Function
+ErrHandler:
+  SetError "[DecompressBytes] Error " & err.Number & ": " & err.Description
+End Function
+
+Public Function DetectCompressionAlgorithm(ByRef inputData() As Byte) As CompressionAlgorithm
+  ' Detect the compression algorithm from the leading bytes.
+  ' Returns a CompressionAlgorithm value, or -1 if unrecognised.
+  '   cabinet.dll buffer-mode header: 0A 51 E5 C0 18 00 .. [2-5 at byte 7]
+  '   vbaSquash (RTL) header:          "SQUASH"          .. [12-14 at byte 7]
+  '   gzip:                            1F 8B 08 ...       -> caGzip
+  '   zlib:                            CM=8, header mod 31 -> caZlib (heuristic)
+  ' For the two byte-7 families the enum value equals byte 7, so detection just
+  ' confirms the magic and returns it. Raw DEFLATE has no header and is never
+  ' auto-detected by design; callers must name caDeflate explicitly.
+
+  DetectCompressionAlgorithm = -1
+  On Error Resume Next
+
+  If Not IsByteArrayUsable(inputData) Then Exit Function
+  Dim dataLo As Long
+  dataLo = LBound(inputData)
+  If UBound(inputData) - dataLo < 7 Then Exit Function
+
+  ' cabinet.dll buffer-mode magic -> byte 7 is the cabinet algorithm ID (2-5)
+  If inputData(dataLo) = CAB_MAGIC_BYTE_0 And inputData(dataLo + 1) = CAB_MAGIC_BYTE_1 And _
+     inputData(dataLo + 2) = CAB_MAGIC_BYTE_2 And inputData(dataLo + 3) = CAB_MAGIC_BYTE_3 And _
+     inputData(dataLo + 4) = CAB_MAGIC_BYTE_4 And inputData(dataLo + 5) = CAB_MAGIC_BYTE_5 Then
+    If inputData(dataLo + 7) >= caMSZIP And inputData(dataLo + 7) <= caLZMS Then _
+      DetectCompressionAlgorithm = inputData(dataLo + 7)
+    Exit Function
+  End If
+
+  ' vbaSquash "SQUASH" magic -> byte 7 is the RTL enum value (12-14)
+  If inputData(dataLo) = RTL_MAGIC_BYTE_0 And inputData(dataLo + 1) = RTL_MAGIC_BYTE_1 And _
+     inputData(dataLo + 2) = RTL_MAGIC_BYTE_2 And inputData(dataLo + 3) = RTL_MAGIC_BYTE_3 And _
+     inputData(dataLo + 4) = RTL_MAGIC_BYTE_4 And inputData(dataLo + 5) = RTL_MAGIC_BYTE_5 Then
+    If inputData(dataLo + 7) >= caRTL_LZNT1 And inputData(dataLo + 7) <= caRTL_XPRESS_HUFFMAN Then _
+      DetectCompressionAlgorithm = inputData(dataLo + 7)
+    Exit Function
+  End If
+
+  ' gzip native magic (1F 8B) with CM = 8 (deflate). Distinctive, low false-positive.
+  If inputData(dataLo) = &H1F And inputData(dataLo + 1) = &H8B And inputData(dataLo + 2) = &H8 Then
+    DetectCompressionAlgorithm = caGzip
+    Exit Function
+  End If
+
+  ' zlib native framing: CM = 8 (deflate) and the 2-byte header is a multiple of
+  ' 31. There is no unique zlib magic, so this is a heuristic and is checked last.
+  ' The four header-bearing families differ in byte 0, so no earlier match reaches
+  ' here (cabinet 0A, SQUASH 53, gzip 1F, none has low nibble 8). Raw DEFLATE has
+  ' no header and is never auto-detected by design.
+  If (inputData(dataLo) And &HF) = 8 Then
+    If ((CLng(inputData(dataLo)) * 256& + CLng(inputData(dataLo + 1))) Mod 31&) = 0 Then _
+      DetectCompressionAlgorithm = caZlib
+  End If
+End Function
+
+Private Function CompressArchiveInt(ByRef inputData() As Byte, ByVal Algorithm As CompressionAlgorithm) As Byte()
+  ' All three formats share the same raw DEFLATE core produced by the existing
+  ' Deflate_ArchiveInt helper (format_raw + gzip filter, header/trailer stripped).
+  Dim raw() As Byte
+  raw = Deflate_ArchiveInt(inputData)   ' sets LastError on failure
+  If Not IsByteArrayUsable(raw) Then Exit Function
+
+  Select Case Algorithm
+    Case caDeflate
+      CompressArchiveInt = raw
+    Case caGzip
+      CompressArchiveInt = WrapGzip(inputData, raw)
+    Case caZlib
+      CompressArchiveInt = WrapZlib(inputData, raw)
+    Case Else
+      SetError "[CompressArchiveInt] Unsupported algorithm: " & Algorithm
+  End Select
+End Function
+
+Private Function DecompressArchiveInt(ByRef inputData() As Byte, ByVal Algorithm As CompressionAlgorithm) As Byte()
+  Dim raw() As Byte
+
+  Select Case Algorithm
+    Case caDeflate
+      DecompressArchiveInt = Inflate_ArchiveInt(inputData)
+
+    Case caGzip
+      raw = StripGzipToDeflate(inputData)
+      If Not IsByteArrayUsable(raw) Then Exit Function
+      DecompressArchiveInt = Inflate_ArchiveInt(raw)
+
+    Case caZlib
+      raw = StripZlibToDeflate(inputData)
+      If Not IsByteArrayUsable(raw) Then Exit Function
+      Dim outData() As Byte
+      outData = Inflate_ArchiveInt(raw)
+      If Not IsByteArrayUsable(outData) Then Exit Function
+      Dim hi As Long
+      hi = UBound(inputData)
+      Dim expect() As Byte: expect = Adler32Bytes(outData)
+      If inputData(hi - 3) <> expect(0) Or inputData(hi - 2) <> expect(1) Or _
+         inputData(hi - 1) <> expect(2) Or inputData(hi) <> expect(3) Then
+        LogMessage logWarning, "[DecompressArchiveInt] Adler-32 mismatch (advisory)"
+      End If
+      DecompressArchiveInt = outData
+
+    Case Else
+      SetError "[DecompressArchiveInt] Unsupported algorithm: " & Algorithm
+  End Select
+End Function
+
+Private Function WrapGzip(ByRef Original() As Byte, ByRef rawDeflate() As Byte) As Byte()
+  ' Wrap a raw DEFLATE stream in RFC 1952 gzip framing: 10-byte header, the
+  ' DEFLATE payload, then a CRC-32 and ISIZE trailer (both little-endian) computed
+  ' over the ORIGINAL uncompressed data. RtlComputeCrc32 is the standard gzip/zlib
+  ' CRC-32, so the output is valid for external gzip tools too.
+
+  If Not IsByteArrayUsable(rawDeflate) Then Exit Function
+  Dim n As Long, origLen As Long
+  n = UBound(rawDeflate) - LBound(rawDeflate) + 1
+  origLen = UBound(Original) - LBound(Original) + 1
+
+  Dim outBuf() As Byte
+  ReDim outBuf(0 To GZIP_HEADER_LEN + n + GZIP_FOOTER_LEN - 1)
+
+  outBuf(0) = &H1F: outBuf(1) = &H8B: outBuf(2) = &H8   ' magic + CM = deflate
+  ' bytes 3-8 remain zero (FLG, MTIME, XFL)
+  outBuf(9) = &HFF                                       ' OS = unknown
+  apiCopyMemory VarPtr(outBuf(GZIP_HEADER_LEN)), VarPtr(rawDeflate(LBound(rawDeflate))), n
+
+  Dim crc As Long: crc = CalculateCRC32(Original)
+  apiCopyMemory VarPtr(outBuf(GZIP_HEADER_LEN + n)), VarPtr(crc), 4
+  apiCopyMemory VarPtr(outBuf(GZIP_HEADER_LEN + n + 4)), VarPtr(origLen), 4
+
+  WrapGzip = outBuf
+End Function
+
+' Wrap a raw DEFLATE stream in RFC 1950 zlib framing: 78 9C header, the DEFLATE
+' payload, then a 4-byte big-endian Adler-32 over the original uncompressed data.
+Private Function WrapZlib(ByRef Original() As Byte, ByRef rawDeflate() As Byte) As Byte()
+  If Not IsByteArrayUsable(rawDeflate) Then Exit Function
+  Dim n As Long: n = UBound(rawDeflate) - LBound(rawDeflate) + 1
+
+  Dim outBuf() As Byte
+  ReDim outBuf(0 To n + 5)   ' 2 header + n payload + 4 Adler-32
+
+  outBuf(0) = RFC1950_HEADER_BYTE_0   ' 78
+  outBuf(1) = RFC1950_HEADER_BYTE_1   ' 9C
+  apiCopyMemory VarPtr(outBuf(2)), VarPtr(rawDeflate(LBound(rawDeflate))), n
+
+  Dim ad() As Byte: ad = Adler32Bytes(Original)   ' already big-endian
+  outBuf(n + 2) = ad(0): outBuf(n + 3) = ad(1)
+  outBuf(n + 4) = ad(2): outBuf(n + 5) = ad(3)
+
+  WrapZlib = outBuf
+End Function
+
+' Strip RFC 1952 gzip framing and return the raw DEFLATE payload. Handles the
+' optional FEXTRA / FNAME / FCOMMENT / FHCRC fields so external gzip data with a
+' non-minimal header is parsed correctly, not just our own minimal output.
+Private Function StripGzipToDeflate(ByRef gz() As Byte) As Byte()
+  Dim lo As Long, hi As Long, n As Long
+  lo = LBound(gz): hi = UBound(gz): n = hi - lo + 1
+  If n < GZIP_HEADER_LEN + GZIP_FOOTER_LEN Then
+    SetError "[StripGzipToDeflate] input too small for gzip framing": Exit Function
+  End If
+  If gz(lo) <> &H1F Or gz(lo + 1) <> &H8B Then
+    SetError "[StripGzipToDeflate] bad gzip magic": Exit Function
+  End If
+  If gz(lo + 2) <> &H8 Then
+    SetError "[StripGzipToDeflate] unexpected compression method": Exit Function
+  End If
+
+  Dim flg As Long, pos As Long
+  flg = gz(lo + 3)
+  pos = lo + GZIP_HEADER_LEN
+
+  If (flg And &H4) <> 0 Then          ' FEXTRA: 2-byte length then that many bytes
+    Dim xlen As Long
+    xlen = CLng(gz(pos)) Or (CLng(gz(pos + 1)) * 256&)
+    pos = pos + 2 + xlen
+  End If
+  If (flg And &H8) <> 0 Then pos = SkipZeroTerminated(gz, pos)    ' FNAME
+  If (flg And &H10) <> 0 Then pos = SkipZeroTerminated(gz, pos)   ' FCOMMENT
+  If (flg And &H2) <> 0 Then pos = pos + 2                        ' FHCRC
+
+  Dim deflateLen As Long
+  deflateLen = (hi + 1) - pos - GZIP_FOOTER_LEN
+  If deflateLen <= 0 Then SetError "[StripGzipToDeflate] no DEFLATE payload": Exit Function
+
+  Dim raw() As Byte: ReDim raw(0 To deflateLen - 1)
+  apiCopyMemory VarPtr(raw(0)), VarPtr(gz(pos)), deflateLen
+  StripGzipToDeflate = raw
+End Function
+
+Private Function SkipZeroTerminated(ByRef data() As Byte, ByVal start As Long) As Long
+  Dim pos As Long: pos = start
+  Do While pos <= UBound(data)
+    Dim ch As Byte: ch = data(pos): pos = pos + 1
+    If ch = 0 Then Exit Do
+  Loop
+  SkipZeroTerminated = pos
+End Function
+
+Private Function StripZlibToDeflate(ByRef zl() As Byte) As Byte()
+ ' Strip RFC 1950 zlib framing and return the raw DEFLATE payload. Validates the
+ ' 2-byte header (CM = deflate, header checksum mod 31) and drops the 4-byte
+ ' Adler-32 trailer. A preset dictionary (FDICT) is skipped if present.
+
+  Dim lo As Long, hi As Long, n As Long
+  lo = LBound(zl): hi = UBound(zl): n = hi - lo + 1
+  If n < 7 Then SetError "[StripZlibToDeflate] input too small for zlib framing": Exit Function
+
+  Dim cmf As Long, flg As Long
+  cmf = zl(lo): flg = zl(lo + 1)
+  If (cmf And &HF) <> 8 Then SetError "[StripZlibToDeflate] compression method is not deflate": Exit Function
+  If ((cmf * 256& + flg) Mod 31&) <> 0 Then SetError "[StripZlibToDeflate] invalid zlib header checksum": Exit Function
+
+  Dim hdrLen As Long: hdrLen = 2
+  If (flg And &H20) <> 0 Then hdrLen = 6     ' FDICT: skip 4-byte DICTID
+
+  Dim deflateLen As Long
+  deflateLen = n - hdrLen - 4                ' drop the Adler-32 trailer
+  If deflateLen <= 0 Then SetError "[StripZlibToDeflate] no DEFLATE payload": Exit Function
+
+  Dim raw() As Byte: ReDim raw(0 To deflateLen - 1)
+  apiCopyMemory VarPtr(raw(0)), VarPtr(zl(lo + hdrLen)), deflateLen
+  StripZlibToDeflate = raw
+End Function
+
+' Compute the Adler-32 checksum and return it as 4 big-endian bytes (the order
+' RFC 1950 stores it). Values are kept below 2^16 throughout so no Long overflow
+' occurs when they are split into bytes.
+Private Function Adler32Bytes(ByRef data() As Byte) As Byte()
+  Const MOD_ADLER As Long = 65521
+  Dim a As Long, b As Long, i As Long
+  a = 1: b = 0
+  If IsByteArrayUsable(data) Then
+    For i = LBound(data) To UBound(data)
+      a = (a + data(i)) Mod MOD_ADLER
+      b = (b + a) Mod MOD_ADLER
+    Next
+  End If
+
+  Dim outBuf(0 To 3) As Byte
+  outBuf(0) = CByte(b \ 256): outBuf(1) = CByte(b Mod 256)
+  outBuf(2) = CByte(a \ 256): outBuf(3) = CByte(a Mod 256)
+  Adler32Bytes = outBuf
+End Function
+
+Private Function CompressCabinet(ByRef inputData() As Byte, ByVal Algorithm As Long) As Byte()
+  Dim srcSize As Long, reqSize As LongPtr, written As LongPtr
+  Dim OK As Long, hComp As LongPtr
+  Dim outBuf() As Byte
+
+  On Error GoTo ErrHandler
+
+  ' The enum value is the cabinet.dll algorithm ID (caMSZIP=2 .. caLZMS=5).
+  If Algorithm < caMSZIP Or Algorithm > caLZMS Then
+    SetError "[CompressCabinet] Unsupported algorithm: " & Algorithm: Exit Function
+  End If
+
+  srcSize = UBound(inputData) - LBound(inputData) + 1
+
+  OK = CreateCompressor(Algorithm, 0, hComp)
+  If OK = 0 Or hComp = 0 Then
+    SetError "[CompressCabinet] CreateCompressor failed (err " & err.LastDllError & ")"
+    GoTo Cleanup
+  End If
+
+  ' Step 1: size probe. Expects FALSE plus ERROR_INSUFFICIENT_BUFFER, with the
+  ' required output size returned by reference.
+  OK = CompressAPI(hComp, VarPtr(inputData(LBound(inputData))), srcSize, 0, 0, reqSize)
+  If OK = 0 And err.LastDllError = ERROR_INSUFFICIENT_BUFFER Then
+    If reqSize > 0 Then
+      ReDim outBuf(0 To CLng(reqSize) - 1)
+      ' Step 2: compress for real. Buffer mode writes the 12-byte cabinet
+      ' header (algorithm ID at byte 7) ahead of the payload.
+      OK = CompressAPI(hComp, VarPtr(inputData(LBound(inputData))), srcSize, VarPtr(outBuf(0)), reqSize, written)
+      If OK <> 0 And written > 0 Then
+        If written < reqSize Then ReDim Preserve outBuf(0 To CLng(written) - 1)
+        CompressCabinet = outBuf
+      Else
+        SetError "[CompressCabinet] compress step failed (err " & err.LastDllError & ")"
+      End If
+    Else
+      SetError "[CompressCabinet] size probe returned zero bytes"
+    End If
+  Else
+    SetError "[CompressCabinet] size probe unexpected (err " & err.LastDllError & ", req " & reqSize & ")"
+  End If
+
+Cleanup:
+  If hComp <> 0 Then CloseCompressor hComp
+  Exit Function
+ErrHandler:
+  SetError "[CompressCabinet] error " & err.Number & ": " & err.Description
+  GoTo Cleanup
+End Function
+
+Private Function DecompressCabinet(ByRef inputData() As Byte, ByVal Algorithm As Long) As Byte()
+  Dim OK As Long, hDecomp As LongPtr
+  
+  Dim srcSize As Long, outSize As LongPtr
+  Dim outBuf() As Byte
+
+  On Error GoTo ErrHandler
+
+  If Algorithm < caMSZIP Or Algorithm > caLZMS Then
+    SetError "[DecompressCabinet] Unsupported algorithm: " & Algorithm: Exit Function
+  End If
+
+  srcSize = UBound(inputData) - LBound(inputData) + 1
+
+  OK = CreateDecompressor(Algorithm, 0, hDecomp)
+  If OK = 0 Or hDecomp = 0 Then
+    SetError "[DecompressCabinet] CreateDecompressor failed (err " & err.LastDllError & ")"
+    GoTo Cleanup
+  End If
+
+  ' Step 1: size probe. Returns FALSE with the required size by reference.
+  OK = DecompressAPI(hDecomp, VarPtr(inputData(LBound(inputData))), srcSize, 0, 0, outSize)
+  If OK = 0 And outSize > 0 Then
+    ReDim outBuf(0 To CLng(outSize) - 1)
+    ' Step 2: decompress. outSize goes in as the buffer capacity (ByVal) and
+    ' comes back as the actual byte count (ByRef).
+    OK = DecompressAPI(hDecomp, VarPtr(inputData(LBound(inputData))), srcSize, VarPtr(outBuf(0)), outSize, outSize)
+    If OK <> 0 Then
+      If outSize > 0 Then
+        If outSize <> UBound(outBuf) + 1 Then ReDim Preserve outBuf(0 To CLng(outSize) - 1)
+        DecompressCabinet = outBuf
+      End If
+    Else
+      SetError "[DecompressCabinet] decompress step failed (err " & err.LastDllError & ")"
+    End If
+  Else
+    SetError "[DecompressCabinet] size probe failed (err " & err.LastDllError & ")"
+  End If
+
+Cleanup:
+  If hDecomp <> 0 Then CloseDecompressor hDecomp
+  Exit Function
+ErrHandler:
+  SetError "[DecompressCabinet] error " & err.Number & ": " & err.Description
+  GoTo Cleanup
+End Function
+
+Private Function CompressRtl(ByRef inputData() As Byte, ByVal Algorithm As Long, ByVal engine As NtCompressionEngine) As Byte()
+  Dim inputSize As Long, outBufSize As Long, finalSize As Long
+  Dim wsSize As Long, fragSize As Long
+  Dim ws As LongPtr
+  Dim formatAndEngine As Long, status As Long
+  Dim raw() As Byte
+
+  On Error GoTo ErrHandler
+
+  If Algorithm < caRTL_LZNT1 Or Algorithm > caRTL_XPRESS_HUFFMAN Then
+    SetError "[CompressRtl] Unsupported algorithm: " & Algorithm: Exit Function
+  End If
+
+  inputSize = UBound(inputData) - LBound(inputData) + 1
+  formatAndEngine = (Algorithm - 10) Or CLng(engine)   ' ntdll format = enum value - 10
+
+  ' 1. Workspace size for this format + engine.
+  status = RtlGetCompressionWorkSpaceSize(formatAndEngine, wsSize, fragSize)
+  If status <> STATUS_SUCCESS Then
+    SetError "[CompressRtl] RtlGetCompressionWorkSpaceSize failed: &H" & Hex$(status)
+    GoTo Cleanup
+  End If
+
+  ' 2. Allocate workspace (compression always needs the buffer workspace).
+  If wsSize > 0 Then
+    ws = VirtualAlloc(0, wsSize, MEM_COMMIT Or MEM_RESERVE, PAGE_READWRITE)
+    If ws = 0 Then SetError "[CompressRtl] VirtualAlloc failed (err " & err.LastDllError & ")": GoTo Cleanup
+  End If
+
+  ' 3. Output buffer, with room for LZNT1's worst case (incompressible input can grow).
+  outBufSize = inputSize + (inputSize \ 8) + 4096
+  ReDim raw(0 To outBufSize - 1)
+
+  ' 4. Compress.
+  status = RtlCompressBuffer(formatAndEngine, VarPtr(inputData(LBound(inputData))), inputSize, _
+                             VarPtr(raw(0)), outBufSize, 4096, finalSize, ws)
+  ' NTSTATUS values with the top bit clear are successes. In particular,
+  ' STATUS_BUFFER_ALL_ZEROS (&H117) means "compressed, and the input was all zeros".
+  If status < 0 Then
+    SetError "[CompressRtl] RtlCompressBuffer failed: &H" & Hex$(status)
+    GoTo Cleanup
+  End If
+  If finalSize <= 0 Then SetError "[CompressRtl] compressor produced no output": GoTo Cleanup
+
+  ReDim Preserve raw(0 To finalSize - 1)
+
+  ' 5. Prepend the 12-byte vbaSquash header so DecompressBytes can auto-route.
+  CompressRtl = BuildSquashHeader(inputSize, Algorithm, engine, raw)
+
+Cleanup:
+  If ws <> 0 Then VirtualFree ws, 0, MEM_RELEASE
+  Exit Function
+ErrHandler:
+  SetError "[CompressRtl] error " & err.Number & ": " & err.Description
+  GoTo Cleanup
+End Function
+
+Private Function DecompressRtl(ByRef inputData() As Byte, ByVal Algorithm As Long, ByVal OriginalSize As Long) As Byte()
+  Dim status As Long, finalSize As Long
+  Dim payload() As Byte, dest() As Byte
+  Dim payloadOffset As Long, payloadSize As Long, inputLo As Long
+  Dim wsSize As Long, fragSize As Long
+  Dim ws As LongPtr
+
+  On Error GoTo ErrHandler
+
+  ' Read algorithm and original size from the vbaSquash header if present. The
+  ' header is authoritative: byte 7 gives the algorithm, bytes 8-11 the size.
+  inputLo = LBound(inputData)
+  If UBound(inputData) - inputLo >= 11 Then
+    If inputData(inputLo) = RTL_MAGIC_BYTE_0 And inputData(inputLo + 1) = RTL_MAGIC_BYTE_1 And _
+       inputData(inputLo + 2) = RTL_MAGIC_BYTE_2 And inputData(inputLo + 3) = RTL_MAGIC_BYTE_3 And _
+       inputData(inputLo + 4) = RTL_MAGIC_BYTE_4 And inputData(inputLo + 5) = RTL_MAGIC_BYTE_5 Then
+      Algorithm = inputData(inputLo + 7)
+      CopyMemory OriginalSize, inputData(inputLo + 8), 4
+      payloadOffset = 12
+    End If
+  End If
+
+  If Algorithm < caRTL_LZNT1 Or Algorithm > caRTL_XPRESS_HUFFMAN Then
+    SetError "[DecompressRtl] Unsupported or undetermined algorithm: " & Algorithm: Exit Function
+  End If
+  If OriginalSize <= 0 Then
+    SetError "[DecompressRtl] OriginalSize required when data carries no vbaSquash header"
+    Exit Function
+  End If
+
+  ' Extract the compressed payload, skipping the header if one was present.
+  payloadSize = (UBound(inputData) - inputLo + 1) - payloadOffset
+  If payloadSize <= 0 Then SetError "[DecompressRtl] no payload after header": Exit Function
+  ReDim payload(0 To payloadSize - 1)
+  CopyMemory payload(0), inputData(inputLo + payloadOffset), payloadSize
+
+  ReDim dest(0 To OriginalSize - 1)
+
+  ' Workspace: LZNT1 and XPRESS return a fragment size of 0 (none needed),
+  ' XPRESS_HUFFMAN requires one. VirtualAlloc rejects a size of 0, so allocate
+  ' only when the fragment size is non-zero.
+  status = RtlGetCompressionWorkSpaceSize(Algorithm - 10, wsSize, fragSize)
+  If status <> STATUS_SUCCESS Then
+    SetError "[DecompressRtl] RtlGetCompressionWorkSpaceSize failed: &H" & Hex$(status)
+    GoTo Cleanup
+  End If
+  If fragSize > 0 Then
+    ws = VirtualAlloc(0, fragSize, MEM_COMMIT Or MEM_RESERVE, PAGE_READWRITE)
+    If ws = 0 Then SetError "[DecompressRtl] VirtualAlloc failed (err " & err.LastDllError & ")": GoTo Cleanup
+  End If
+
+  status = RtlDecompressBufferEx(Algorithm - 10, VarPtr(dest(0)), OriginalSize, _
+                                 VarPtr(payload(0)), payloadSize, finalSize, ws)
+  If status <> STATUS_SUCCESS Then
+    SetError "[DecompressRtl] RtlDecompressBufferEx failed: &H" & Hex$(status) & " (check format and OriginalSize)"
+    GoTo Cleanup
+  End If
+
+  If finalSize < OriginalSize Then ReDim Preserve dest(0 To finalSize - 1)
+  DecompressRtl = dest
+
+Cleanup:
+  If ws <> 0 Then VirtualFree ws, 0, MEM_RELEASE
+  Exit Function
+ErrHandler:
+  SetError "[DecompressRtl] error " & err.Number & ": " & err.Description
+  GoTo Cleanup
+End Function
+
+' Build the 12-byte vbaSquash header and prepend it to RawData.
+' Layout: "SQUASH" (0-5), engine (6), algorithm 12-14 (7), uncompressed size
+' as a little-endian Long (8-11). The engine is stored as its eighth root so
+' it fits one byte (0->0, 256->2) and is recovered as byte 6 raised to the 8th.
+Private Function BuildSquashHeader(ByVal UncompressedSize As Long, ByVal Algorithm As Long, _
+                                    ByVal engine As NtCompressionEngine, ByRef rawData() As Byte) As Byte()
+  Dim payloadSize As Long
+  payloadSize = UBound(rawData) - LBound(rawData) + 1
+  If payloadSize <= 0 Then Exit Function
+
+  Dim outBuf() As Byte
+  ReDim outBuf(0 To payloadSize + 11)
+
+  outBuf(0) = RTL_MAGIC_BYTE_0: outBuf(1) = RTL_MAGIC_BYTE_1: outBuf(2) = RTL_MAGIC_BYTE_2
+  outBuf(3) = RTL_MAGIC_BYTE_3: outBuf(4) = RTL_MAGIC_BYTE_4: outBuf(5) = RTL_MAGIC_BYTE_5
+  ' Engine stored as its eighth root so it fits one byte and stays compatible
+  ' with the vbaSquash decode (byte 6 raised to the 8th).
+  
+  Select Case engine
+    Case COMPRESSION_ENGINE_MAXIMUM
+      outBuf(6) = 2    ' 2^8 = 256
+    Case Else
+      outBuf(6) = 0    ' 0^8 = 0 (standard)
+  End Select
+  outBuf(7) = CByte(Algorithm)                ' 12, 13, or 14
+  CopyMemory outBuf(8), UncompressedSize, 4
+  CopyMemory outBuf(12), rawData(LBound(rawData)), payloadSize
+
+  BuildSquashHeader = outBuf
+End Function
+
+Private Function pvCryptoAesInit(ByRef State As ArchiveCryptoState, ByRef baPass() As Byte, ByVal passLen As Long, ByRef baSalt() As Byte, ByVal lKeyLen As Long, ByRef nPassVer As Integer) As Boolean
   Dim hResult As Long, lDummy As Long
 
   If State.hPbkdf2Alg = 0 Then
@@ -2773,7 +3690,7 @@ Private Function pvCryptoAesInit(ByRef State As ArchiveCryptoState, ByRef baPass
   Dim baDerivedKey() As Byte
   ReDim baDerivedKey(0 To 2 * lKeyLen + 1)
 
-  hResult = BCryptDeriveKeyPBKDF2(State.hPbkdf2Alg, baPass(0), UBound(baPass) + 1, baSalt(0), UBound(baSalt) + 1, CLngLng(PBKDF2_ITERATIONS), baDerivedKey(0), UBound(baDerivedKey) + 1, 0)
+  hResult = BCryptDeriveKeyPBKDF2(State.hPbkdf2Alg, baPass(0), passLen, baSalt(0), UBound(baSalt) - LBound(baSalt) + 1, CLngLng(PBKDF2_ITERATIONS), baDerivedKey(0), UBound(baDerivedKey) + 1, 0)
 
   If hResult < 0 Then
     SetError "[pvCryptoAesInit] BCryptDeriveKeyPBKDF2 failed: " & Hex$(hResult)
@@ -2926,11 +3843,6 @@ Private Sub pvCryptoTerminate(ByRef State As ArchiveCryptoState)
   If State.hPbkdf2Alg <> 0 Then BCryptCloseAlgorithmProvider State.hPbkdf2Alg, 0: State.hPbkdf2Alg = 0
 End Sub
 
-Private Sub pvCryptoGetRandom(ByVal lSize As Long, ByRef baOutput() As Byte)
-  ReDim baOutput(0 To lSize - 1)
-  RtlGenRandom baOutput(0), lSize
-End Sub
-
 Private Function CalculateCRC32(ByRef data() As Byte) As Long
   If Not IsByteArrayUsable(data) Then CalculateCRC32 = 0: Exit Function
   CalculateCRC32 = RtlComputeCrc32(0, data(LBound(data)), UBound(data) - LBound(data) + 1)
@@ -2942,7 +3854,7 @@ Private Function SaveZip_AES() As Boolean
   m_TotalCompressedSize = 0
 
   Dim hFile As LongPtr
-  hFile = apiCreateFileW(StrPtr(m_SourceFile), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(m_SourceFile), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then
     hFile = 0
     SetError "[SaveZip_AES] cannot create output file: " & m_SourceFile
@@ -2969,32 +3881,38 @@ Private Function SaveZip_AES() As Boolean
       SetError "[SaveZip_AES] Unexpected encryption mode " & m_Encryption
       GoTo Cleanup
   End Select
+  If Len(m_Passphrase) = 0 Then
+    SetError "[SaveZip_AES] An AES passphrase is required."
+    GoTo Cleanup
+  End If
   Dim baPass() As Byte
-  baPass = ToUtf8Z(m_Passphrase)
-  
-  ' ToUtf8Z appends a null terminator - strip it for PBKDF2
+  baPass = ToUtf8(m_Passphrase)
   Dim passLen As Long
-  passLen = UBound(baPass) ' exclude null terminator
+  If Not IsByteArrayUsable(baPass) Then
+    SetError "[SaveZip_AES] Could not encode the AES passphrase as UTF-8."
+    GoTo Cleanup
+  End If
+  passLen = UBound(baPass) - LBound(baPass) + 1
   
-  Dim fileInfos() As AesFileInfo, currentOffset As Long, i As Long, ok As Boolean
+  Dim fileInfos() As AesFileInfo, currentOffset As Long, i As Long, OK As Boolean
   
   ReDim fileInfos(0 To m_QueueCount - 1)
-  ok = True
+  OK = True
   RaiseEvent ProgressEvent("Writing AES ZIP...", 0)
   
   For i = 0 To m_QueueCount - 1
     If m_ProgressInterval > 0 And (i Mod m_ProgressInterval) = 0 Then
-      RaiseEvent ProgressEvent("Encrypting: " & m_Queue(i).Name, CLng((i + 1) / m_QueueCount * 100))
+      RaiseEvent ProgressEvent("Encrypting: " & m_Queue(i).name, CLng((i + 1) / m_QueueCount * 100))
     End If
     fileInfos(i).LocalHeaderOffset = currentOffset
     Dim entryOk As Boolean
     entryOk = WriteAesEntry(hFile, m_Queue(i), fileInfos(i), baPass, passLen, lKeyLen, lSaltLen, bStrength)
     If Not entryOk Then
-      AppendReport "FAILED : " & m_Queue(i).Name & " - " & m_LastError
-      LogMessage logWarning, "SaveZip_AES: entry failed: " & m_Queue(i).Name
-      ok = False
+      AppendReport "FAILED : " & m_Queue(i).name & " - " & m_LastError
+      LogMessage logWarning, "SaveZip_AES: entry failed: " & m_Queue(i).name
+      GoTo Cleanup
     Else
-      AppendReport "OK     : " & m_Queue(i).Name
+      AppendReport "OK     : " & m_Queue(i).name
       ' Add sizes from the populated AesFileInfo struct
       m_TotalUncompressedSize = m_TotalUncompressedSize + CLngLng(fileInfos(i).UncompressedSize)
       m_TotalCompressedSize = m_TotalCompressedSize + CLngLng(fileInfos(i).CompressedSize)
@@ -3021,7 +3939,7 @@ Private Function SaveZip_AES() As Boolean
   End If
   
   RaiseEvent ProgressEvent("Done", 100)
-  SaveZip_AES = ok
+  SaveZip_AES = OK
   GoTo Cleanup
 
 ErrHandler:
@@ -3033,18 +3951,19 @@ Cleanup:
     apiCloseHandle hFile
     hFile = 0
   End If
+  If Not SaveZip_AES Then apiDeleteFileW StrPtr(m_SourceFile)
 End Function
 
 Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, ByRef fi As AesFileInfo, ByRef baPass() As Byte, ByVal passLen As Long, ByVal lKeyLen As Long, ByVal lSaltLen As Long, ByVal bStrength As Byte) As Boolean
   ' Processes one queue entry end-to-end: load, compress, encrypt, write LFH.
   ' Populates fi with the metadata needed for the central directory.
-  fi.Name = e.Name
-  fi.isFolder = e.isFolder
+  fi.name = e.name
+  fi.IsFolder = e.IsFolder
   fi.ModifiedDate = e.ModifiedDate
-  fi.NameLenUtf8 = UBound(ToUtf8(fi.Name)) + 1
+  fi.NameLenUtf8 = UBound(ToUtf8(fi.name)) + 1
 
   ' Folders are zero-size entries and are not encrypted
-  If e.isFolder Then
+  If e.IsFolder Then
     fi.IsEncrypted = False
     fi.CRC32 = 0
     fi.UncompressedSize = 0
@@ -3057,13 +3976,13 @@ Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, By
 
   Dim rawData() As Byte
   If Len(e.SourcePath) > 0 Then
-    Dim fileSize As LongLong: fileSize = GetFileSize64(e.SourcePath)
+    Dim fileSize As LongLong: fileSize = GetFileSize(e.SourcePath)
     If fileSize < 0 Then
       SetError "[WriteAesEntry] Could not read " & e.SourcePath
       Exit Function
     End If
     If fileSize > 0 Then
-      rawData = ReadFileToBytes(e.SourcePath)
+      rawData = ReadFile(e.SourcePath)
       If Not IsByteArrayUsable(rawData) Then
         SetError "[WriteAesEntry] Could not read " & e.SourcePath
         Exit Function
@@ -3094,7 +4013,7 @@ Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, By
   fi.CRC32 = CalculateCRC32(rawData)
 
   Dim CompressedData() As Byte, compressionMethod As Integer, shouldStore As Boolean
-  shouldStore = (m_CompressionLevel = 0) Or (m_SkipCompressedTypes And IsCompressedFileType(e.Name)) Or (UncompressedSize = 0)
+  shouldStore = (m_CompressionLevel = 0) Or (m_SkipCompressedTypes And IsCompressedFileType(e.name)) Or (UncompressedSize = 0)
 
   If shouldStore Then
     CompressedData = rawData
@@ -3103,7 +4022,7 @@ Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, By
     CompressedData = Deflate_ArchiveInt(rawData)
     If Not IsByteArrayUsable(CompressedData) Then
       ' DEFLATE failed - fall back to store
-      LogMessage logWarning, "WriteAesEntry: Deflate_ArchiveInt failed for " & e.Name & ", storing."
+      LogMessage logWarning, "WriteAesEntry: Deflate_ArchiveInt failed for " & e.name & ", storing."
       CompressedData = rawData
       compressionMethod = COMPRESSION_STORE
     Else
@@ -3117,10 +4036,15 @@ Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, By
   ' AES encryption route
   Dim baSalt() As Byte, encHeader() As Byte, baMac() As Byte, nPassVer As Integer, aesState As ArchiveCryptoState
 
-  pvCryptoGetRandom lSaltLen, baSalt
+  ReDim baSalt(0 To lSaltLen - 1)
+  If RtlGenRandom(baSalt(0), lSaltLen) = 0 Then
+    SetError "[WriteAesEntry] Cryptographic random salt generation failed for " & e.name
+    Exit Function
+  End If
 
-  If Not pvCryptoAesInit(aesState, baPass, baSalt, lKeyLen, nPassVer) Then
-    SetError "[WriteAesEntry] AES init failed for " & e.Name
+  If Not pvCryptoAesInit(aesState, baPass, passLen, baSalt, lKeyLen, nPassVer) Then
+    SetError "[WriteAesEntry] AES init failed for " & e.name
+    pvCryptoTerminate aesState
     Exit Function
   End If
 
@@ -3130,7 +4054,11 @@ Private Function WriteAesEntry(ByVal hFile As LongPtr, ByRef e As QueueEntry, By
   apiCopyMemory VarPtr(encHeader(lSaltLen)), VarPtr(nPassVer), 2
 
   ' Encrypt in place; hash after XOR (encrypt path: HashBefore=False, HashAfter=True)
-  pvCryptoAesCrypt aesState, CompressedData, , , False, True
+  If Not pvCryptoAesCrypt(aesState, CompressedData, , , False, True) Then
+    SetError "[WriteAesEntry] AES encryption failed for " & e.name
+    pvCryptoTerminate aesState
+    Exit Function
+  End If
   baMac = pvCryptoAesGetFinalHash(aesState, HMAC_TAG_LEN)
   pvCryptoTerminate aesState
 
@@ -3149,7 +4077,7 @@ Private Function WriteLFH(ByVal hFile As LongPtr, ByRef fi As AesFileInfo, ByRef
   ' Any of encHeader / compressedData / baMac may be Nothing / empty
 
   Dim nameUtf8() As Byte, nameLen As Integer
-  nameUtf8 = ToUtf8(fi.Name)
+  nameUtf8 = ToUtf8(fi.name)
   nameLen = UBound(nameUtf8) + 1
 
   Dim extraLen As Integer, baExtra() As Byte
@@ -3163,7 +4091,7 @@ Private Function WriteLFH(ByVal hFile As LongPtr, ByRef fi As AesFileInfo, ByRef
   Dim flags As Integer
   flags = 0
   If fi.IsEncrypted Then flags = flags Or &H1
-  If fi.NameLenUtf8 <> Len(fi.Name) Then flags = flags Or &H800
+  If fi.NameLenUtf8 <> Len(fi.name) Then flags = flags Or &H800
 
   ' Version needed: 51 for AES, 20 otherwise
   Dim verNeeded As Integer
@@ -3220,7 +4148,7 @@ End Function
 Private Function WriteAesCDH(ByVal hFile As LongPtr, ByRef fi As AesFileInfo) As Boolean
   ' WriteAesCDH
   Dim nameUtf8() As Byte, nameLen As Integer
-  nameUtf8 = ToUtf8(fi.Name)
+  nameUtf8 = ToUtf8(fi.name)
   nameLen = UBound(nameUtf8) + 1
 
   Dim extraLen As Integer, baExtra() As Byte
@@ -3232,15 +4160,15 @@ Private Function WriteAesCDH(ByVal hFile As LongPtr, ByRef fi As AesFileInfo) As
   ' Flags must match the LFH exactly (bit 0 = encrypted, bit 11 = UTF-8 name).
   Dim flags As Integer
   If fi.IsEncrypted Then flags = flags Or &H1
-  If fi.NameLenUtf8 <> Len(fi.Name) Then flags = flags Or &H800
+  If fi.NameLenUtf8 <> Len(fi.name) Then flags = flags Or &H800
 
   Dim verNeeded As Integer
   verNeeded = IIf(fi.compressionMethod = COMPRESSION_AES, 51, 20)
 
   Dim extAttr As Long
-  extAttr = IIf(fi.isFolder, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL)
+  extAttr = IIf(fi.IsFolder, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL)
 
-' CDH is 46 bytes fixed
+  ' CDH is 46 bytes fixed
   Dim buf(0 To 45) As Byte
   WriteLong buf, 0, SIGNATURE_CDH
   WriteInt buf, 4, verNeeded             ' version made by
@@ -3282,19 +4210,19 @@ Private Function WriteAesEOCD(ByVal hFile As LongPtr, ByVal entryCount As Long, 
   WriteAesEOCD = WriteRawBytes(hFile, buf)
 End Function
 
-Private Sub WriteLong(ByRef buf() As Byte, ByVal Pos As Long, ByVal val As Long)
+Private Sub WriteLong(ByRef buf() As Byte, ByVal pos As Long, ByVal val As Long)
   ' Write a 4-byte little-endian Long into buf() at offset pos
-  apiCopyMemory VarPtr(buf(Pos)), VarPtr(val), 4
+  apiCopyMemory VarPtr(buf(pos)), VarPtr(val), 4
 End Sub
 
-Private Sub WriteInt(ByRef buf() As Byte, ByVal Pos As Long, ByVal val As Long)
+Private Sub WriteInt(ByRef buf() As Byte, ByVal pos As Long, ByVal val As Long)
   ' Write a 2-byte little-endian Integer into buf() at offset pos
   Dim i As Long
   i = val And &HFFFF&
   If i > 32767 Then i = i - 65536
   Dim n As Integer
   n = CInt(i)
-  apiCopyMemory VarPtr(buf(Pos)), VarPtr(n), 2
+  apiCopyMemory VarPtr(buf(pos)), VarPtr(n), 2
 End Sub
 
 Private Function WriteRawBytes(ByVal hFile As LongPtr, ByRef data() As Byte) As Boolean
@@ -3304,10 +4232,10 @@ Private Function WriteRawBytes(ByVal hFile As LongPtr, ByRef data() As Byte) As 
     Exit Function
   End If
 
-  Dim bytesToWrite As Long, bytesWritten As Long, result As Long
+  Dim bytesToWrite As Long, bytesWritten As Long, Result As Long
   bytesToWrite = UBound(data) - LBound(data) + 1
-  result = apiWriteFile(hFile, data(LBound(data)), bytesToWrite, bytesWritten, 0)
-  WriteRawBytes = (result <> 0 And bytesWritten = bytesToWrite)
+  Result = apiWriteFile(hFile, data(LBound(data)), bytesToWrite, bytesWritten, 0)
+  WriteRawBytes = (Result <> 0 And bytesWritten = bytesToWrite)
   If Not WriteRawBytes Then SetError "[WriteRawBytes] Write failed"
 
 End Function
@@ -3354,14 +4282,10 @@ Private Function GetFilePosition(ByVal hFile As LongPtr) As Long
   GetFilePosition = SetFilePointer(hFile, 0, 0, 1)  ' FILE_CURRENT = 1
 End Function
 
-' ------------------------------------------------------------------------------
-' Deflate_ArchiveInt
-' ------------------------------------------------------------------------------
-' Compresses inputData using archiveint.dll's gzip filter, then strips the
-' 10-byte gzip header and 8-byte gzip trailer to yield a raw DEFLATE stream.
-' Returns an empty array on failure.
-'
 Private Function Deflate_ArchiveInt(ByRef inputData() As Byte) As Byte()
+  ' Compresses inputData using archiveint.dll's gzip filter, then strips the
+  ' 10-byte gzip header and 8-byte gzip trailer to yield a raw DEFLATE stream.
+  ' Returns an empty array on failure.
   Dim a       As LongPtr
   Dim e       As LongPtr
   Dim gz()    As Byte
@@ -3431,18 +4355,32 @@ Private Function Deflate_ArchiveInt(ByRef inputData() As Byte) As Byte()
     Exit Function
   End If
 
-  Dim written As LongPtr
-  written = archive_write_data(a, VarPtr(inputData(LBound(inputData))), inSize)
+  Dim written As LongPtr, totalWritten As Long
+  Do While totalWritten < inSize
+    written = archive_write_data(a, VarPtr(inputData(LBound(inputData))) + totalWritten, inSize - totalWritten)
+    If written <= 0 Then
+      SetError "[Deflate_ArchiveInt] archive_write_data failed"
+      archive_entry_free e
+      archive_write_close a
+      archive_write_free a
+      Exit Function
+    End If
+    totalWritten = totalWritten + CLng(written)
+  Loop
 
   archive_entry_free e
-  archive_write_finish_entry a
-  archive_write_close a
-  archive_write_free a
-
-  If written < 0 Then
-    SetError "[Deflate_ArchiveInt] archive_write_data failed"
+  If archive_write_finish_entry(a) <> ARCHIVE_OK Then
+    SetError "[Deflate_ArchiveInt] archive_write_finish_entry failed"
+    archive_write_close a
+    archive_write_free a
     Exit Function
   End If
+  If archive_write_close(a) <> ARCHIVE_OK Then
+    SetError "[Deflate_ArchiveInt] archive_write_close failed"
+    archive_write_free a
+    Exit Function
+  End If
+  archive_write_free a
 
   Dim usedLen As Long: usedLen = CLng(used)
 
@@ -3474,18 +4412,16 @@ Private Function Deflate_ArchiveInt(ByRef inputData() As Byte) As Byte()
   Deflate_ArchiveInt = deflated
 End Function
 
-' ------------------------------------------------------------------------------
-' Inflate_ArchiveInt
-' ------------------------------------------------------------------------------
-' Decompresses a raw DEFLATE stream by wrapping it in a minimal gzip shell and
-' feeding it to archiveint.dll's read pipeline.
-'
-' The gzip footer (CRC32 + ISIZE) is zeroed because:
-'   a) The decompressed data is unavailable before decompression.
-'   b) libarchive does not validate the gzip trailer on read.
-'
-' Returns an empty array on failure.
 Private Function Inflate_ArchiveInt(ByRef deflated() As Byte) As Byte()
+  ' Decompresses a raw DEFLATE stream by wrapping it in a minimal gzip shell and
+  ' feeding it to archiveint.dll's read pipeline.
+  '
+  ' The gzip footer (CRC32 + ISIZE) is zeroed because:
+  '   a) The decompressed data is unavailable before decompression.
+  '   b) libarchive does not validate the gzip trailer on read.
+  '
+  ' Returns an empty array on failure.
+
   Dim a As LongPtr, entry As LongPtr, gz() As Byte, gzSize As Long
   Dim chunks() As Byte, p As LongPtr, sz As LongPtr, off As LongLong, total As LongLong, inSize As Long
 
@@ -3495,7 +4431,6 @@ Private Function Inflate_ArchiveInt(ByRef deflated() As Byte) As Byte()
   gzSize = GZIP_HEADER_LEN + inSize + GZIP_FOOTER_LEN
 
   ' Build gzip wrapper
-  ' ReDim initialises all bytes to zero - footer stays zero intentionally
   ReDim gz(0 To gzSize - 1)
   gz(0) = &H1F            ' gzip magic
   gz(1) = &H8B
@@ -3557,24 +4492,6 @@ Private Function Inflate_ArchiveInt(ByRef deflated() As Byte) As Byte()
   Inflate_ArchiveInt = chunks
 End Function
 
-Private Sub LogMessage(ByVal level As ArcLogLevel, ByVal msg As String)
-  ' Writes a message at the given level to the configured output(s).
-  ' Respects m_LogLevel - messages below the threshold are silently dropped.
-  If level < m_LogLevel Then Exit Sub
-  Dim prefix As String
-  Select Case level
-    Case logDebug:   prefix = "[DBG] "
-    Case logInfo:    prefix = "[INF] "
-    Case logWarning: prefix = "[WRN] "
-    Case logError:   prefix = "[ERR] "
-    Case Else:       prefix = "[   ] "
-  End Select
-  Debug.Print prefix & msg
-End Sub
-
-Private Sub ClearError()
-  m_LastError = ""
-End Sub
 
 Private Function FirstNonIsoSafeSegment() As String
   ' Returns the first queued entry name containing a path SEGMENT that has no
@@ -3583,7 +4500,7 @@ Private Function FirstNonIsoSafeSegment() As String
   ' Returns "" if every segment has at least one ASCII character to anchor a base name.
   Dim i As Long, segs() As String, s As Long, seg As String
   For i = 0 To m_QueueCount - 1
-    segs = Split(Replace$(m_Queue(i).Name, "\", "/"), "/")
+    segs = Split(Replace$(m_Queue(i).name, "\", "/"), "/")
     For s = LBound(segs) To UBound(segs)
       seg = segs(s)
       If Len(seg) > 0 Then
@@ -3592,11 +4509,12 @@ Private Function FirstNonIsoSafeSegment() As String
           Exit Function
         End If
       End If
-    Next s
-  Next i
+    Next
+  Next
 End Function
 
 Private Function SegmentHasAscii(ByVal seg As String) As Boolean
+  ' True if seg contains at least one ASCII character. Needed for ISO path.
   Dim k As Long, c As Long
   For k = 1 To Len(seg)
     c = AscW(mId$(seg, k, 1)) And &HFFFF&
@@ -3604,26 +4522,28 @@ Private Function SegmentHasAscii(ByVal seg As String) As Boolean
       SegmentHasAscii = True
       Exit Function
     End If
-  Next k
+  Next
 End Function
 
 Private Function FirstNonAsciiQueueEntryName() As String
+  ' Returns the first queued entry name containing any character outside
+  ' plain ASCII. FCIAddFile's pszFileName parameter is ANSI, and VBA
+  ' converts a non-ASCII String to ANSI silently when calling a Declare
+  ' with a plain String parameter, rather than raising an error, so this
+  ' is checked explicitly up front instead of discovering a mangled or
+  ' colliding name inside the finished cabinet. Returns "" if every
+  ' queued name is plain ASCII.
   Dim i As Long, j As Long, ch As Long
   For i = 0 To m_QueueCount - 1
-    For j = 1 To Len(m_Queue(i).Name)
-      ch = AscW(mId$(m_Queue(i).Name, j, 1)) And &HFFFF&
+    For j = 1 To Len(m_Queue(i).name)
+      ch = AscW(mId$(m_Queue(i).name, j, 1)) And &HFFFF&
       If ch > 127 Then
-        FirstNonAsciiQueueEntryName = m_Queue(i).Name
+        FirstNonAsciiQueueEntryName = m_Queue(i).name
         Exit Function
       End If
-    Next j
-  Next i
+    Next
+  Next
 End Function
-
-Private Sub SetError(ByVal msg As String)
-  m_LastError = msg
-  LogMessage logError, msg
-End Sub
 
 Private Function AssertMode(ByVal required As ArchiveMode, ByVal caller As String) As Boolean
   ' Returns True if the current mode matches the required mode.
@@ -3687,6 +4607,8 @@ Private Function PtrToStringW(ByVal ptr As LongPtr) As String
 End Function
 
 Private Function PtrToStringA(ByVal ptr As LongPtr) As String
+  ' Reads a null-terminated ANSI/UTF-8 string from a raw pointer.
+  ' Used for archive_error_string which returns char*.
   If ptr = 0 Then Exit Function
   Dim cb As Long
   cb = lstrlenA(ptr)
@@ -3710,6 +4632,8 @@ Private Function IsByteArrayUsable(ByRef data() As Byte) As Boolean
 End Function
 
 Private Function LastArchiveError(ByVal h As LongPtr) As String
+  ' Returns libarchive's human-error string for a handle
+  ' Currently using it to deal with an edge case re: ISO, but useful nonetheless
   If h = 0 Then Exit Function
   LastArchiveError = PtrToStringA(archive_error_string(h))
 End Function
@@ -3728,20 +4652,21 @@ Private Function FolderExists(ByVal path As String) As Boolean
   FolderExists = (attrs And FILE_ATTRIBUTE_DIRECTORY) <> 0
 End Function
 
-Private Function GetFileSize64(ByVal path As String) As LongLong
-  GetFileSize64 = -1
-  Dim hFile As LongPtr
-  hFile = apiCreateFileW(StrPtr(path), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+Private Function GetFileSize(ByVal path As String) As LongLong
+  ' Returns the file size as a LongLong, or -1 on failure.
+  Dim hFile    As LongPtr
+  Dim fsz      As LARGE_INTEGER
+
+  GetFileSize = -1
+  hFile = apiCreateFile(StrPtr(path), GENERIC_READ, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, _
+                        0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then Exit Function
-  Dim rawSize As Currency
-  If apiGetFileSizeEx(hFile, rawSize) = 0 Then
-    apiCloseHandle hFile
-    Exit Function
+  If apiGetFileSizeEx(hFile, fsz) <> 0 Then
+    Dim ll As LongLong
+    CopyMemory ll, fsz, 8
+    GetFileSize = ll
   End If
   apiCloseHandle hFile
-  Dim llSize As LongLong
-  apiCopyMemory VarPtr(llSize), VarPtr(rawSize), 8
-  GetFileSize64 = llSize
 End Function
 
 Private Function FileModifiedDate(ByVal path As String) As Date
@@ -3765,42 +4690,73 @@ Private Function FileModifiedDate(ByVal path As String) As Date
   On Error GoTo 0
 End Function
 
-Private Function ReadFileToBytes(ByVal path As String) As Byte()
-  Dim llSize As LongLong
-  llSize = GetFileSize64(path)
-  If llSize < 0 Then SetError "[ReadFileToBytes] cannot stat " & path: Exit Function
-  If llSize = 0 Then Exit Function
-  If llSize >= 2 ^ 31 Then SetError "[ReadFileToBytes] file too large: " & path: Exit Function
+Private Function ReadFile(ByVal FilePath As String, Optional ByVal MaxBytes As Long = 0) As Byte()
+  ' Query size and read data through one handle so the source cannot change between opens.
+  Dim hFile     As LongPtr
+  Dim fsz       As LARGE_INTEGER
+  Dim readSize  As Long
+  Dim bytesRead As Long
+  Dim totalRead As Long
+  Dim remaining As Long
+  Dim chunkSize As Long
+  Dim Result()  As Byte
 
-  Dim fileSize As Long: fileSize = CLng(llSize)
-  Dim buf() As Byte: ReDim buf(0 To fileSize - 1)
+  hFile = apiCreateFile(StrPtr(FilePath), GENERIC_READ, FILE_SHARE_READ Or FILE_SHARE_WRITE Or FILE_SHARE_DELETE, _
+                        0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+  If hFile = INVALID_HANDLE_VALUE Then
+    SetError "[ReadFile] Could not open: " & FilePath
+    Exit Function
+  End If
 
-  Dim hFile As LongPtr
-  hFile = apiCreateFileW(StrPtr(path), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
-  If hFile = INVALID_HANDLE_VALUE Then SetError "[ReadFileToBytes] Cannot open " & path: Exit Function
+  If apiGetFileSizeEx(hFile, fsz) = 0 Then
+    apiCloseHandle hFile
+    SetError "[ReadFile] Could not stat: " & FilePath
+    Exit Function
+  End If
 
-  Dim totalRead As Long, bytesRead As Long, remaining As Long
-  remaining = fileSize
+  If fsz.HighPart <> 0 Then
+    ' File larger than 2 GB - honour MaxBytes if set, else cap at VBA Long limit
+    readSize = IIf(MaxBytes > 0, MaxBytes, &H7FFFFFFF)
+  Else
+    readSize = fsz.LowPart
+    If MaxBytes > 0 And MaxBytes < readSize Then readSize = MaxBytes
+  End If
+
+  If readSize <= 0 Then apiCloseHandle hFile: Exit Function
+
+  ReDim Result(0 To readSize - 1)
+  remaining = readSize
   Do While remaining > 0
-    Dim chunkSize As Long: chunkSize = IIf(remaining > STREAM_CHUNK_SIZE, STREAM_CHUNK_SIZE, remaining)
-    If apiReadFile(hFile, buf(totalRead), chunkSize, bytesRead, 0) = 0 Then
-      SetError "[ReadFileToBytes] Read failed: " & path
-      apiCloseHandle hFile: Exit Function
+    chunkSize = remaining
+    If chunkSize > STREAM_CHUNK_SIZE Then chunkSize = STREAM_CHUNK_SIZE
+    If apiReadFile(hFile, Result(totalRead), chunkSize, bytesRead, 0) = 0 Then
+      apiCloseHandle hFile
+      SetError "[ReadFile] Read failed: " & FilePath
+      Exit Function
     End If
-    If bytesRead = 0 Then Exit Do
+    If bytesRead = 0 Then
+      apiCloseHandle hFile
+      SetError "[ReadFile] Unexpected end of file: " & FilePath
+      Exit Function
+    End If
     totalRead = totalRead + bytesRead
     remaining = remaining - bytesRead
   Loop
 
+  ReadFile = Result
+
   apiCloseHandle hFile
-  If totalRead < fileSize Then ReDim Preserve buf(0 To totalRead - 1)
-  ReadFileToBytes = buf
 End Function
 
 Private Function DateToUnix(ByVal d As Date) As Long
-  On Error Resume Next
-  DateToUnix = CLng((d - UNIX_EPOCH_OFFSET) * 86400#)
-  On Error GoTo 0
+  ' set_mtime takes a 32-bit time_t, so fold into the signed Long range rather
+  ' than letting CLng overflow (which On Error turned into 1970). Dates from
+  ' 19/01/2038 wrap negative and read back as the correct unsigned value.
+  Dim secs As Double
+  secs = (d - UNIX_EPOCH_OFFSET) * 86400#
+  secs = secs - 4294967296# * Int(secs / 4294967296#)
+  If secs >= 2147483648# Then secs = secs - 4294967296#
+  DateToUnix = CLng(secs)
 End Function
 
 Private Function UnixToDate(ByVal unix As LongLong) As Date
@@ -3829,6 +4785,9 @@ Public Function GetArchiveIntVersionDetails() As String
 End Function
 
 Private Function GetComProcAddress(ByVal obj As Object, ByVal memberIndex As Long) As LongPtr
+  ' Resolves a raw function pointer for one of this object's own public
+  ' methods, by reading its own vtable. Slot 7 = 3 IUnknown + 4 IDispatch
+  ' slots, plus the method's position among Public Subs/Functions.
   Dim vTablePtr As LongPtr, pObj As LongPtr, slot As LongPtr
   pObj = ObjPtr(obj)
   CopyMemoryByAddr vTablePtr, pObj, LenB(vTablePtr)
@@ -3849,6 +4808,9 @@ Private Function AddressOfThunkForComProc(ByVal o As Object, ByVal ComProcAddres
 
   If ComProcArgCount <= 4 Then
     EmitBytes bb, p, &H48, &H83, &HEC, &H58
+    ' Zero the return slot first: if the VBA method fails it never writes
+    ' it, and the caller would otherwise receive stack garbage
+    EmitBytes bb, p, &H48, &HC7, &H44, &H24, &H30, 0, 0, 0, 0   ' mov qword [rsp+30h], 0
     EmitBytes bb, p, &H48, &H89, &H4C, &H24, &H38
     EmitBytes bb, p, &H48, &H89, &H54, &H24, &H40
     EmitBytes bb, p, &H4C, &H89, &H44, &H24, &H48
@@ -3894,6 +4856,7 @@ Private Function AddressOfThunkForComProc(ByVal o As Object, ByVal ComProcAddres
     EmitBytes bb, p, &H4C, &H8B, &H5C, &H24, &H30
 
     EmitBytes bb, p, &H48, &H83, &HEC, &H78
+    EmitBytes bb, p, &H48, &HC7, &H44, &H24, &H40, 0, 0, 0, 0   ' mov qword [rsp+40h], 0 (return slot)
     EmitBytes bb, p, &H48, &H89, &H4C, &H24, &H48
     EmitBytes bb, p, &H48, &H89, &H54, &H24, &H50
     EmitBytes bb, p, &H4C, &H89, &H44, &H24, &H58
@@ -3936,9 +4899,19 @@ Private Function AddressOfThunkForComProc(ByVal o As Object, ByVal ComProcAddres
 
   iThunkSize = p
   ReDim Preserve bb(0 To p - 1)
-  AddressOfThunkForComProc = VirtualAlloc(0, iThunkSize, MEM_COMMIT Or MEM_RESERVE, PAGE_EXECUTE_READWRITE)
-  If AddressOfThunkForComProc = 0 Then Exit Function
-  CopyMemoryByPtr AddressOfThunkForComProc, bb(0), iThunkSize
+
+  ' Never writable and executable at the same time (apparently): allocate read-write,
+  ' copy the code in, switch to execute-read, flush the instruction cache.
+  Dim pMem As LongPtr, oldProtect As Long
+  pMem = VirtualAlloc(0, iThunkSize, MEM_COMMIT Or MEM_RESERVE, PAGE_READWRITE)
+  If pMem = 0 Then Exit Function
+  CopyMemoryByPtr pMem, bb(0), iThunkSize
+  If VirtualProtect(pMem, iThunkSize, PAGE_EXECUTE_READ, oldProtect) = 0 Then
+    VirtualFree pMem, 0, MEM_RELEASE
+    Exit Function
+  End If
+  FlushInstructionCache GetCurrentProcess(), pMem, iThunkSize
+  AddressOfThunkForComProc = pMem
 End Function
 
 Private Sub EmitBytes(ByRef bb() As Byte, ByRef p As Long, ParamArray values() As Variant)
@@ -3949,15 +4922,11 @@ Private Sub EmitBytes(ByRef bb() As Byte, ByRef p As Long, ParamArray values() A
   Next
 End Sub
 
-Private Sub EmitPtr(ByRef bb() As Byte, ByRef p As Long, ByVal Value As LongPtr)
-  Dim cb As Long: cb = LenB(Value)
-  CopyMemory bb(p), Value, cb
+Private Sub EmitPtr(ByRef bb() As Byte, ByRef p As Long, ByVal value As LongPtr)
+  Dim cb As Long: cb = LenB(value)
+  CopyMemory bb(p), value, cb
   p = p + cb
 End Sub
-
-'====================================================================
-' Helpers
-'====================================================================
 
 Private Function fStringFromPtrA(ByVal ptr As LongPtr) As String
   Dim b As Byte, s As String
@@ -3983,18 +4952,24 @@ Private Sub SplitCabPath(ByVal fullPath As String, ByRef sDir As String, ByRef s
   End If
 End Sub
 
-Private Sub CopyAnsiToFixedBuffer(ByRef dest() As Byte, ByVal src As String)
+Private Function CopyAnsiToFixedBuffer(ByRef dest() As Byte, ByVal src As String) As Boolean
   Dim b() As Byte, i As Long
   If Len(src) = 0 Then
     dest(0) = 0
-    Exit Sub
+    CopyAnsiToFixedBuffer = True
+    Exit Function
   End If
   b = StrConv(src, vbFromUnicode)
+  If UBound(b) - LBound(b) + 1 > UBound(dest) - LBound(dest) Then
+    SetError "[CopyAnsiToFixedBuffer] source too long for " & (UBound(dest) + 1) & "-byte buffer: " & src
+    Exit Function
+  End If
   For i = LBound(b) To UBound(b)
-    dest(i) = b(i)
-  Next i
-  dest(UBound(b) + 1) = 0
-End Sub
+    dest(LBound(dest) + i - LBound(b)) = b(i)
+  Next
+  dest(LBound(dest) + UBound(b) - LBound(b) + 1) = 0
+  CopyAnsiToFixedBuffer = True
+End Function
 
 Private Sub CopyAnsiStringToPtr(ByVal ptr As LongPtr, ByVal src As String)
   Dim b() As Byte
@@ -4003,6 +4978,13 @@ Private Sub CopyAnsiStringToPtr(ByVal ptr As LongPtr, ByVal src As String)
 End Sub
 
 Private Function SaveCab_FCI() As Boolean
+  ' Consumes m_Queue/m_QueueCount and writes to m_SourceFile, same shape
+  ' as SaveLibArchive, called from SaveFile when m_Type = atCab. FCIAddFile
+  ' only ever adds from a real file on disk (it opens the source itself via
+  ' the GetOpenInfo callback), so in-memory (byte array) entries are spooled
+  ' to a temp file first via SpoolBytesToTempFile, and cleaned up afterwards
+  ' regardless of outcome.
+    
   Dim hfci As LongPtr
   Dim erf As erf
   Dim cab As CCAB
@@ -4012,15 +4994,24 @@ Private Function SaveCab_FCI() As Boolean
 
   SplitCabPath m_SourceFile, sDir, sName
 
+  ' CompressionLevel also selects the CAB compressor:
+  ' 0 = store, 1-5 = MSZIP (faster), 6-9 = LZX with a 2 MB window (smaller).
+  Dim cabCompress As Integer
+  Select Case m_CompressionLevel
+    Case 0:      cabCompress = tcompTYPE_NONE
+    Case 1 To 5: cabCompress = tcompTYPE_MSZIP
+    Case Else:   cabCompress = tcompTYPE_LZX_21
+  End Select
+
   With cab
     .cb = &H7FFFFFFF
     .cbFolderThresh = 900000
     .iCab = 1
     .iDisk = 0
     .setID = 0
-    CopyAnsiToFixedBuffer cab.szDisk, vbNullString
-    CopyAnsiToFixedBuffer cab.szCab, sName
-    CopyAnsiToFixedBuffer cab.szCabPath, sDir
+    If Not CopyAnsiToFixedBuffer(cab.szDisk, vbNullString) Then SaveCab_FCI = False: Exit Function
+    If Not CopyAnsiToFixedBuffer(cab.szCab, sName) Then SaveCab_FCI = False: Exit Function
+    If Not CopyAnsiToFixedBuffer(cab.szCabPath, sDir) Then SaveCab_FCI = False: Exit Function
   End With
 
   hfci = FCICreate(erf, m_Thunks(0).ptr, m_Thunks(1).ptr, m_Thunks(2).ptr, m_Thunks(3).ptr, m_Thunks(4).ptr, m_Thunks(5).ptr, m_Thunks(6).ptr, m_Thunks(7).ptr, m_Thunks(8).ptr, m_Thunks(9).ptr, cab, 0)
@@ -4032,7 +5023,7 @@ Private Function SaveCab_FCI() As Boolean
   End If
 
   For i = 0 To m_QueueCount - 1
-    If Not m_Queue(i).isFolder Then
+    If Not m_Queue(i).IsFolder Then
       Dim SourcePath As String
       SourcePath = m_Queue(i).SourcePath
 
@@ -4040,7 +5031,7 @@ Private Function SaveCab_FCI() As Boolean
         If IsByteArrayUsable(m_Queue(i).data) Then
           SourcePath = SpoolBytesToTempFile(m_Queue(i).data)
           If Len(SourcePath) = 0 Then
-            SetError "[SaveCab_FCI] Could not spool in-memory entry '" & m_Queue(i).Name & "' to a temp file."
+            SetError "[SaveCab_FCI] Could not spool in-memory entry '" & m_Queue(i).name & "' to a temp file."
             FCIDestroy hfci
             CleanupTempFiles tempFiles
             SaveCab_FCI = False
@@ -4048,7 +5039,7 @@ Private Function SaveCab_FCI() As Boolean
           End If
           tempFiles.Add SourcePath
         Else
-          SetError "[SaveCab_FCI] Entry '" & m_Queue(i).Name & "' has neither a source path nor usable data."
+          SetError "[SaveCab_FCI] Entry '" & m_Queue(i).name & "' has neither a source path nor usable data."
           FCIDestroy hfci
           CleanupTempFiles tempFiles
           SaveCab_FCI = False
@@ -4057,19 +5048,20 @@ Private Function SaveCab_FCI() As Boolean
       End If
 
       Dim cabEntryName As String
-      cabEntryName = Replace$(m_Queue(i).Name, "/", "\")
-      If FCIAddFile(hfci, SourcePath, cabEntryName, 0, m_Thunks(11).ptr, m_Thunks(12).ptr, m_Thunks(10).ptr, tcompTYPE_MSZIP) = 0 Then
-        LogFciError "FCIAddFile (" & m_Queue(i).Name & ")", erf
+      cabEntryName = Replace$(m_Queue(i).name, "/", "\")
+      
+      If FCIAddFile(hfci, SourcePath, cabEntryName, 0, m_Thunks(11).ptr, m_Thunks(12).ptr, m_Thunks(10).ptr, cabCompress) = 0 Then
+        LogFciError "FCIAddFile (" & m_Queue(i).name & ")", erf
         FCIDestroy hfci
         CleanupTempFiles tempFiles
         SaveCab_FCI = False
         Exit Function
       End If
     End If
-  ' CAB has no native empty-folder entry, folder structure is
-  ' implied by the paths of the files added beneath it, so isFolder
-  ' placeholders are silently skipped rather than treated as an error.
-  Next i
+    ' CAB has no native empty-folder entry, folder structure is
+    ' implied by the paths of the files added beneath it, so isFolder
+    ' placeholders are silently skipped rather than treated as an error.
+  Next
 
   If FCIFlushCabinet(hfci, 0, m_Thunks(11).ptr, m_Thunks(12).ptr) = 0 Then
     LogFciError "FCIFlushCabinet", erf
@@ -4096,7 +5088,7 @@ Private Function SpoolBytesToTempFile(ByRef data() As Byte) As String
   If GetTempFileNameW(StrPtr(sPath), StrPtr("CAB"), 0, StrPtr(sFile)) = 0 Then Exit Function
   sFile = Left$(sFile, InStr(sFile, vbNullChar) - 1)
 
-  hFile = apiCreateFileW(StrPtr(sFile), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
+  hFile = apiCreateFile(StrPtr(sFile), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0)
   If hFile = INVALID_HANDLE_VALUE Then Exit Function
 
   If UBound(data) >= LBound(data) Then
@@ -4111,7 +5103,7 @@ Private Sub CleanupTempFiles(ByVal files As Collection)
   Dim f As Variant
   For Each f In files
     apiDeleteFileW StrPtr(CStr(f))
-  Next f
+  Next
 End Sub
 
 Private Sub LogFciError(ByVal stage As String, ByRef erf As erf)
@@ -4122,14 +5114,45 @@ Private Sub ValidateThunkAddresses()
   Dim i As Long, j As Long
   For i = 0 To 12
     If m_Thunks(i).ptr = 0 Then
-      err.Raise vbObjectError + 30, "ChibiCabWriter", "Thunk build failed for " & m_Thunks(i).Name & ". Check the callback block order has not shifted."
+      err.Raise vbObjectError + 30, "ChibiCabWriter", "Thunk build failed for " & m_Thunks(i).name & ". Check the callback block order has not shifted."
     End If
     For j = i + 1 To 12
       If m_Thunks(i).ptr = m_Thunks(j).ptr Then
-        err.Raise vbObjectError + 31, "ChibiCabWriter", "Duplicate thunk address for " & m_Thunks(i).Name & " and " & m_Thunks(j).Name & ". Vtable resolution has gone wrong."
+        err.Raise vbObjectError + 31, "ChibiCabWriter", "Duplicate thunk address for " & m_Thunks(i).name & " and " & m_Thunks(j).name & ". Vtable resolution has gone wrong."
       End If
-    Next j
-  Next i
+    Next
+  Next
+End Sub
+
+Private Sub LogMessage(ByVal level As ArcLogLevel, ByVal msg As String)
+  ' Writes a message at the given level to the configured output(s).
+  ' Respects m_LogLevel - messages below the threshold are silently dropped.
+  If level < m_LogLevel Then Exit Sub
+  Dim prefix As String
+  Select Case level
+    Case logDebug:   prefix = "[DBG] "
+    Case logInfo:    prefix = "[INF] "
+    Case logWarning: prefix = "[WRN] "
+    Case logError:   prefix = "[ERR] "
+    Case Else:       prefix = "[   ] "
+  End Select
+  Debug.Print prefix & msg
+End Sub
+
+Private Sub SetError(ByVal msg As String)
+  m_LastError = msg
+  LogMessage logError, msg
+End Sub
+
+Private Sub ClearError()
+  m_LastError = ""
+End Sub
+
+Private Sub NoteCallbackError(ByVal ProcName As String)
+  ' An error inside an FCI callback cannot unwind back through cabinet.dll's
+  ' native code, so each callback catches its own, records it here, and hands
+  ' FCI its documented failure value instead.
+  SetError "[" & ProcName & "] runtime error " & err.Number & " - " & err.Description
 End Sub
 
 #If False Then
@@ -4141,4 +5164,9 @@ End Sub
   Dim logNone, logImmediate
   Dim arcModeNone, arcModeRead, arcModeWrite
   Dim acmReject, acmOverwrite, acmRename
+  Dim caMSZIP, caXPRESS, caXPRESS_HUFF, caLZMS, caRTL_LZNT1, caRTL_XPRESS
+  Dim caRTL_XPRESS_HUFFMAN, caDeflate, caGzip, caZlib
 #End If
+
+
+
