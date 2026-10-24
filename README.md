@@ -2,10 +2,12 @@
 ![ChibiArc logo](logo_chibiarc_small.png)
 # ChibiArc
 
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)
-![VBA](https://img.shields.io/badge/VBA-64bit-purple.svg)
+[![Mentioned in Awesome VBA](https://awesome.re/mentioned-badge.svg)](https://github.com/sancarn/awesome-vba)
+![Language](https://img.shields.io/badge/language-VBA-663D91.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-4028D6.svg)
+![Architecture](https://img.shields.io/badge/arch-64--bit-red.svg)
 ![Dependencies](https://img.shields.io/badge/Dependencies-archiveint.dll-orange.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ChibiArc is a single-class VBA module for reading and writing archive files - ZIP, 7-Zip, TAR variants, and more - directly from Excel, Word, or any Office application.
     
